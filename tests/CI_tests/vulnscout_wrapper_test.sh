@@ -35,7 +35,39 @@ export PATH="$TEST_DIR/bin:/usr/bin:/bin"
 export VULNSCOUT_BUILD_DIR="$TEST_DIR/build"
 export VULNSCOUT_TEST_LOG="$TEST_DIR/container.log"
 
-"$ROOT_DIR/vulnscout" --help | grep -q -- '--refresh-vulnerability-data'
+"$ROOT_DIR/vulnscout" help > "$TEST_DIR/help.txt"
+grep -q -- '--refresh-vulnerability-data' "$TEST_DIR/help.txt"
+awk '
+    /^ +(--|start\||stop\||restart\|)/ {
+        if ($0 !~ /^    [^ ]/) {
+            print "Misaligned help command: " $0 > "/dev/stderr"
+            failed = 1
+        }
+        text = substr($0, 5)
+        if (match(text, /  +[^ ]/) && RSTART + RLENGTH + 3 != 37) {
+            print "Misaligned help description: " $0 > "/dev/stderr"
+            failed = 1
+        }
+    }
+    /^ +[^ ]/ {
+        column = match($0, /[^ ]/)
+        if (column > 9 && column != 37) {
+            print "Misaligned help continuation: " $0 > "/dev/stderr"
+            failed = 1
+        }
+    }
+    /^ +vulnscout / && $0 !~ /^  vulnscout / {
+        print "Misaligned help example: " $0 > "/dev/stderr"
+        failed = 1
+    }
+    END { exit failed }
+' "$TEST_DIR/help.txt"
+"$ROOT_DIR/vulnscout" --help > "$TEST_DIR/help-flag.txt"
+cmp "$TEST_DIR/help.txt" "$TEST_DIR/help-flag.txt"
+"$ROOT_DIR/vulnscout" -h > "$TEST_DIR/help-short.txt"
+cmp "$TEST_DIR/help.txt" "$TEST_DIR/help-short.txt"
+"$ROOT_DIR/vulnscout" > "$TEST_DIR/help-default.txt"
+cmp "$TEST_DIR/help.txt" "$TEST_DIR/help-default.txt"
 
 "$ROOT_DIR/vulnscout" --refresh-vulnerability-data
 grep -q -- '/scan/src/entrypoint.sh --refresh-vulnerability-data' "$VULNSCOUT_TEST_LOG"

@@ -73,25 +73,20 @@ Commands without --project or --variant:
 
     Refresh vulnerability data:
     --refresh-vulnerability-data    Refresh stored vulnerability data, including EPSS
-                                     (optionally limited by --project and --variant)
+                                    (optionally limited by --project and --variant)
 
     Data listing:
     --list-projects                 List all projects and their variants (optionally in JSON format with --json)
     --list-scans                    List all past scans (optionally in JSON format with --json)
 
-    Import or export AI assessment context for a project:
-    --export-context                Export AI assessment context
-    --import-context <path>         Import AI assessment context
-    
     Configuration:
     --config <key> <value>          Set a config value
     --config-list                   Show current configuration
     --config-clear <key>            Remove a config key
 
+Commands scoped by optional --project and --variant:
 
-Commands with optional --project and --variant (uses "default" project and variant if not specified):
-
-    Import a SBOM or vulnerability data file into the selected project/variant:
+    Import a SBOM or vulnerability file (defaults to project/variant "default"):
     --add-spdx <path>               Add an SPDX 2/3 SBOM file or archive
     --add-cve-check <path>          Add a Yocto CVE check JSON file
     --add-yocto-vex <path>          Add a Yocto VEX JSON file
@@ -99,7 +94,7 @@ Commands with optional --project and --variant (uses "default" project and varia
     --add-cdx <path>                Add a CycloneDX file
     --add-grype <path>              Add a Grype results file
 
-    Trigger scanning to detect new vulnerabilities in the selected project/variant:
+    Detect new vulnerabilities (defaults to project/variant "default"):
     --perform-scans <types|all>     Run grype, nvd, osv, sbom-cve-check, or all
                                     (comma-separated types or repeated flag)
 
@@ -107,26 +102,40 @@ Commands with optional --project and --variant (uses "default" project and varia
     --export-spdx                   Export as SPDX 3.0 SBOM
     --export-cdx                    Export as CycloneDX 1.6 SBOM
     --export-openvex                Export as OpenVEX
+                                    A project includes all its variants;
+                                    add --variant to export one variant only
 
-    Import or export custom OpenVEX custom assessments for a project/variant:
-    --export-custom-openvex-assessments Export custom OpenVEX assessments
-    --import-custom-openvex-assessments <path> Import custom OpenVEX assessments
+    Custom OpenVEX assessments (defaults to project/variant "default"):
+    --export-custom-openvex-assessments
+                                    Export custom OpenVEX assessments
+    --import-custom-openvex-assessments <path>
+                                    Import custom OpenVEX assessments
 
     Report generation by project or variant:
-        --report <template|path>    Generate a report from a template
-                                     --project includes all project variants;
-                                     add --variant to report on one variant only
+    --report <template|path>        Generate a report from a template
+                                    A project includes all its variants;
+                                    add --variant to report on one variant only
 
     Test for vulnerabilities matching a condition:
     --match-condition <expr>        Test stored vulnerability data
-                                     --project without --variant tests all project variants
-                                     No scope tests the default project/variant
+                                    A project without --variant tests all its variants
+                                    No scope tests the default project/variant
 
-Commands only requiring --project (uses default project if not specified):
+Project-wide data and context (uses project "default" if not specified):
 
     Import or export custom VulnScout data for a project:
-    --export-custom-vulnscout-data  Export custom VulnScout JSON data
-    --import-custom-vulnscout-data <path> Import custom VulnScout JSON data
+    --export-custom-vulnscout-data
+                                    Export custom VulnScout JSON data
+                                    Add --variant to export one variant only
+    --import-custom-vulnscout-data <path>
+                                    Import custom VulnScout JSON data
+                                    Uses the variants recorded in the file
+
+    Import or export AI assessment context:
+    --export-context                Export AI assessment context
+                                    Add --variant to export one variant only
+    --import-context <path>         Import AI assessment context
+                                    Uses project/variant names recorded in the file
 
 Timestamp options for custom data imports:
     Applies to --import-custom-vulnscout-data and --import-custom-openvex-assessments.
@@ -146,9 +155,9 @@ Environment variables:
     VULNSCOUT_OUTPUTS_DIR   Output directory (default: VULNSCOUT_BUILD_DIR/outputs)
 
 Examples:
-  vulnscout --project test --variant x86 --add-cve-check ./cve.json --add-spdx ./sbom.json
-    vulnscout --project test --variant x86 --perform-scans nvd,osv
-    vulnscout --project test --perform-scans all
+  vulnscout --project test --variant x86 --add-cve-check ./cve.json --add-spdx ./sbom.spdx.json
+  vulnscout --project test --variant x86 --perform-scans nvd,osv
+  vulnscout --project test --perform-scans all
   vulnscout --project test --match-condition "cvss >= 9.0"
   vulnscout --project test --variant x86 --report summary.adoc
   vulnscout --serve
