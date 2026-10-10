@@ -6,7 +6,7 @@ This proof of concept is **localhost-only** (including local host-to-container f
 
 ## Start locally
 
-From the demo worktree, with Python 3.11+ and Node.js installed:
+From the repository root, with Python 3.11+ and Node.js 22.12+ installed:
 
 ```sh
 python3 -m venv .venv
@@ -19,9 +19,10 @@ printf '__END_OF_SCAN_SCRIPT__\n' > "$FLASK_SCAN_FILE"
 .venv/bin/flask --app src.bin.webapp:create_app run --host 127.0.0.1 --port 7275
 ```
 
-The ignored `instance/vulnscout.db` in this worktree is an independent SQLite snapshot of the populated database under the original checkout's `.vulnscout/cache/`. It has been migrated to this branch's schema; running `db upgrade` above affects only the demo copy. Do not point the demo at the original checkout's database. In another terminal:
-
-If an older database is already stamped at revision `z2c3d4e5f6a7` but lacks `assessments.created_at`, run `db upgrade` after updating: the follow-up migration repairs the missing assessment and context timestamp columns.
+This creates a separate local database under the ignored `instance/` directory;
+it does not assume a pre-populated demo database exists. Import SBOMs into it
+through Settings before assessing vulnerabilities. Run `db upgrade` after
+updating the checkout to apply the current migrations. In another terminal:
 
 ```sh
 cd frontend
@@ -38,13 +39,16 @@ Open the Vite URL and select **Agent** in the navbar. The Vite dev proxy forward
 Build the normal image from this repository; it includes both the Copilot SDK and the MCP package:
 
 ```sh
-docker build -t vulnscout:agent-demo .
+docker build -t vulnscout:local .
 ```
 
-Select the locally built image in `.vulnscout/cache/config.env`, run `./vulnscout --stop`, and then run `./vulnscout --serve --dev`:
+Select the locally built image using the host wrapper's configuration, then
+restart in development mode:
 
 ```sh
-VULNSCOUT_IMAGE=vulnscout:agent-demo
+./vulnscout --config VULNSCOUT_IMAGE vulnscout:local
+./vulnscout stop
+./vulnscout --serve --dev
 ```
 
 Remove any old `VULNSCOUT_MCP_SERVER_PATH` setting from `config.env`. Development mode mounts both `src/` and `vulnscout_mcp/`; rebuild the image when dependencies change. Requests from the host reach the container through its default gateway, which the agent recognizes automatically. The container has no host Copilot sign-in. Choose a connector in the agent setup panel.
@@ -71,4 +75,17 @@ Responses stream as text arrives. Expand **Activity** to see tool names and runn
 
 The messages endpoint supports `Accept: application/x-ndjson` for status, text delta, tool activity, heartbeat, and terminal `done` or `error` records. Existing clients without this header still receive a single JSON response. Validation errors remain JSON HTTP errors. Proxies must not buffer streamed responses.
 
-MCP assessment and context write tools are available for explicit change requests without a second approval prompt. Verify the requested target and scope before asking for changes. This MVP uses in-memory conversation state; it does not provide durable multi-user sessions or an OAuth app registration flow.
+MCP reads and writes are constrained to the selected project/variant scope,
+including both variants in a comparison. On AI Context, its own project/variant
+selection defines scope. Changing scope recreates the SDK session rather than
+reusing one with the previous scope. The built-in agent has only VulnScout MCP
+tools: repository skills, host filesystem tools, shell tools, and host Git
+operations are disabled. It cannot run the repository's external
+`cve-assessment` skill or inspect a configured local source tree itself.
+
+MCP assessment and context write tools are available for explicit change
+requests without a second approval prompt. Assessment writes create pending
+AI suggestions; they still require human approval to become official. Verify
+the requested target and scope before asking for changes. This MVP uses
+in-memory conversation state; it does not provide durable multi-user sessions
+or an OAuth app registration flow.

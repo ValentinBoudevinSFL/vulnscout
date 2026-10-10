@@ -44,6 +44,21 @@ The interactive mode is where you investigate each CVE and record your triage de
 
 ---
 
+## Project and Variant Scope
+
+Use the navbar's project/variant selector to choose a project and one or more
+variants, then click **Apply**. **Select Variants** shows the union of selected
+variants; selecting every variant gives a project-wide view. **Compare
+variants** offers **Exclusion** for differences and **Intersection** for
+entries common to both variants. **Swap variants** reverses the comparison.
+Package and vulnerability tables reflect the applied scope.
+
+Search, filters, and column choices are stored in the browser for the relevant
+table/scope, so a reload can restore them. **Reset Filters** clears active
+filters; the project/variant selector controls scope separately.
+
+---
+
 (operation-queue)=
 ## Operation Queue
 
@@ -74,7 +89,7 @@ A small **info icon** next to the search bar opens a quick-reference panel for t
 
 ### Column Visibility
 
-The **Columns** dropdown lets you toggle which columns are displayed. The default set includes Name, Version, Dependency, Vulnerabilities, Variants, and Sources. The **Dependency** column shows each package's incoming and outgoing dependency counts and opens the [dependency graph](#dependency-graph); sort it to list the packages with the highest **In** + **Out** total first, or hide it to skip loading the counts. Additional columns available are:
+The **Columns** dropdown lets you toggle which columns are displayed. The default set includes Name, Version, Dependency, Vulnerabilities, Variants, and Sources, plus Supplier when supplier metadata is available. The **Dependency** column shows each package's incoming and outgoing dependency counts and opens the [dependency graph](#dependency-graph); sort it to list the packages with the highest **In** + **Out** total first, or hide it to skip loading the counts. Additional columns available are:
 
 - **CPE** — Common Platform Enumeration identifiers for the package. These are used by the NVD scanner to match vulnerabilities.
 - **PURL** — Package URL identifiers. These are used by the OSV scanner for more precise ecosystem-level matching.
@@ -82,7 +97,9 @@ The **Columns** dropdown lets you toggle which columns are displayed. The defaul
 
 ### Filters
 
-- **Source**: restrict the table to packages originating from a specific SBOM source (e.g. a particular SPDX or CycloneDX document).
+- **Source**: restrict the table to packages reported by an import/scanner source.
+- **SBOM Source File**: select particular imported documents.
+- **Supplier**: filter by package supplier, when supplier metadata is available.
 - **Outdated**: enable the toggle to show only historical package/variant combinations whose package version is no longer present in that variant's current SBOM. The toggle is off by default.
 
 ### Match Condition
@@ -99,6 +116,7 @@ Each row has a **Show Vulnerabilities** button that navigates to the Vulnerabili
 
 ---
 
+(dependency-graph)=
 ## Dependency Graph
 
 The **Dependency** column of the SBOM table shows how many packages each package depends on (**In**) and how many packages depend on it (**Out**). Click the cell to open the graph and expandable trees for both directions. The graph shows every direct dependency (left, flowing in) and dependent (right, flowing out) of the package in a single diagram; zoom and pan to explore large ones. The **Variants** list beside the graph gives each variant a color, its own **In** / **Out** counts, and a checkbox to show or hide its relationships (all variants are shown by default). Select an SBOM source to narrow the graph to one active document. Neighbouring packages in the graph use the colors of the variants where the relationship exists, split into stripes when it exists in several. Dependency graphs are loaded only when opened, and packages without relationships show zero counts. Outdated packages show **Not in active scan** because dependency data covers active scans only.
@@ -132,7 +150,12 @@ A small **info icon** next to the search bar opens a quick-reference panel for t
 
 ### Column Visibility
 
-The **Columns** dropdown lets you toggle which columns are displayed. The default set includes ID, Severity, EPSS Score, SBOM Affected, Variants, Status, Last Updated, and Published Date, but you can also enable Attack Vector, Estimated Effort, First Scan Date, and Sources.
+The **Columns** dropdown controls the displayed fields, including ID, Severity,
+EPSS Score, SBOM Affected, Variants, Status, and Published Date. Additional
+columns include Attack Vector, Estimated Effort, First Scan Date, Sources, and
+EU KEV. **Last Assessed** is the latest assessment date, **Last Fetched** is
+the most recent provider retrieval, and **Last Updated** records a provider-data
+change; these timestamps have different meanings.
 
 ### Filters
 
@@ -141,11 +164,14 @@ VulnScout provides several filter categories, each accessible from a dedicated d
 - **Source**: restrict the table to vulnerabilities found by a specific scanner or import source (Yocto, Grype, CycloneDX, SPDX3, OpenVEX, or Local User Data).
 - **Severity**: select one or more severity levels (Critical, High, Medium, Low, None). You can also switch to a continuous **score-based** filter using a range slider, which filters by the underlying CVSS max score rather than the categorical label.
 - **Status**: filter by triage status: Pending Assessment, Exploitable, Not affected, or Fixed.
+- **Packages**: restrict the list to vulnerabilities affecting selected packages.
 - **Published Date**: filter vulnerabilities by their NVD publication date. The dropdown supports exact-date matching, before/after comparisons, date ranges, and a "within the last N days" shorthand. This filter becomes active once the NVD sync has completed.
 - **More Filters**: groups less common filters together:
   - **EPSS Range**: a percentage-based range slider that narrows the list to vulnerabilities whose Exploit Prediction Scoring System score falls within the specified band.
   - **Attack Vector**: checkboxes for Network, Adjacent, Local, and Physical, reflecting the CVSS attack-vector metric.
   - **First Scan Date**: multi-select by scan timestamp, useful for identifying which vulnerabilities appeared in a particular import run.
+  - **AI Suggestion**: show vulnerabilities with or without a pending AI
+    suggestion in the current scope.
 
 When any filter is active, a small checkmark badge appears on its button so you can tell at a glance which filters are engaged. A **Reset Filters** button in the top-right corner clears everything back to defaults.
 
@@ -155,13 +181,18 @@ Each row has a checkbox on the left. Selecting one or more rows reveals the **mu
 
 ### Refreshing Vulnerability Data
 
-The vulnerabilities table also exposes a **Refresh Vulnerability Data** dropdown. Unlike the scanners on the Scan History page — which discover *which* CVEs affect your packages — these refreshers **enrich the vulnerabilities you already have** with up-to-date metadata pulled directly from upstream databases. The refresh operates on the vulnerabilities in the current scope.
+The vulnerabilities table also exposes a **Refresh Vulnerability Data**
+dropdown. Unlike scanners on Scan History, these refreshers enrich existing
+vulnerability records rather than discover findings. The refresh operates on
+the vulnerabilities in the current scope.
 
 The dropdown defaults to **Complete refresh**, which updates every available source for the current scope. Choose **Custom refresh** to select the sources to update. The selected sources are submitted together to the **Operation queue** and run in NVD, EPSS, GHSA, EUVD order on the server's pipeline lane. A progress banner below the toolbar shows the current source and count; each queued or running refresh can be cancelled individually. Closing the page does not stop the work, and another tab can see its progress in the same queue. See [Operation Queue](#operation-queue) for recovery and cancellation behavior.
 
 The available sources are:
 
-- **NVD** — re-fetches the publication date and other metadata from NIST's National Vulnerability Database for CVEs in the current scope. This is what makes the **Published Date** column and filter usable.
+- **NVD** — refreshes publication dates, descriptions, and CVSS metadata for
+  CVEs in scope from the local NVD-FKIE database by default. API callers can
+  explicitly select NVD REST API mode.
 - **EPSS** — updates the Exploit Prediction Scoring System probability for CVEs in the current scope, feeding the EPSS column and filter.
 - **GHSA** — refreshes the publication date of GitHub Security Advisory (`GHSA-…`) identifiers in the current scope via the GitHub Advisory API.
 - **ENISA EUVD** — annotates CVEs in the current scope from the European Union Vulnerability Database (see below). This option is only available when the scope contains at least one CVE identifier.
@@ -244,6 +275,13 @@ An SBOM lists the packages that make up your system, but a single vulnerability 
 - **NVD** correlates packages with NIST's National Vulnerability Database using CPE identifiers. It queries every CPE attached to each package, ensuring broad coverage across many ecosystems.
 - **Grype** leverages Anchore's vulnerability database, which combines multiple upstream feeds and applies its own matching heuristics. It is particularly effective at catching vulnerabilities in container and OS-level packages.
 - **OSV** queries the open-source OSV database, which aggregates advisories from language-specific ecosystems (PyPI, npm, Go, Rust, etc.) and Linux distributions. It queries every PURL attached to each package, providing precise ecosystem-level matching.
+- **sbom-cve-check** scans against locally cloned NVD-FKIE and CVEList V5
+  advisory databases. Its automatic database update can require network access,
+  but the analysis itself runs against local data.
+
+The NVD scanner uses local NVD-FKIE data by default; the Flask CLI can select
+NVD REST API mode explicitly. Scanner filters can exclude kernel companion
+packages and Yocto `-native` build-host packages.
 
 By combining these sources, VulnScout reduces the chance of missing a relevant CVE while giving you the **Sources** column and filter to trace exactly where each finding originated. If a vulnerability is reported by multiple scanners, you can have higher confidence that it genuinely applies; if only one scanner flags it, that context helps you prioritise your triage effort.
 
@@ -318,7 +356,10 @@ VulnScout lets you export scan data as JSON files for archiving, reporting, or s
 
 **Per-scan export:** each scan entry has a download button that opens a small menu with two choices:
 
-- **Export Diff** — downloads a JSON file containing only what changed compared to the previous scan (added, removed, upgraded, and unchanged packages, findings, and vulnerabilities). For tool scans the export also includes newly-detected findings and assessments.
+- **Export Diff** — downloads a JSON file with the complete package/finding
+  snapshot plus a `diff` section describing added, removed, upgraded, and
+  unchanged entries. For tool scans the export also includes newly-detected
+  findings and assessments.
 - **Export Scan Result** — downloads a JSON file with the complete global result at that point in time, including full package, finding, and vulnerability lists with source attribution.
 
 Both files include scan metadata (timestamp, scan type, project, and variant) and strip internal identifiers so the output is portable.
@@ -333,7 +374,15 @@ The Review page gives you a consolidated view of every assessment that was creat
 
 ### Assessment Table
 
-The table presents one row per grouped assessment. Assessments that share the same vulnerability, status, justification, notes, workaround, and impact statement are automatically merged into a single row, with their packages and variants combined. This keeps the view compact even when a single triage decision was applied to many packages at once.
+The **Assessments** tab presents one row per stored assessment. A decision
+authored for several variant/package targets remains one multi-target row.
+Independent assessments are not merged just because their text matches; the
+target pairs, not the Cartesian product of packages and variants, define scope.
+
+The **AI Assessments** tab lists pending suggestions with approve/reject
+actions. **Time Estimates** and **Custom CVSS** list user-entered remediation
+estimates and CVSS vectors. Each tab supports selecting rows and deleting the
+selection after confirmation.
 
 The columns include:
 
@@ -350,11 +399,72 @@ The columns include:
 
 ### Search and Filters
 
-The toolbar mirrors the vulnerability table's search bar. Filters include **Status**, **Justification**, and **AI review** (agreed, differed, stale, or no AI review). A multi-target row matches when any target has the selected review state. A **Reset Filters** button clears everything back to defaults. See the "AI review of custom assessments" section in [AI Assessments](ai-assessments.md) for how to request an AI review.
+The toolbar mirrors the vulnerability table's search bar. Assessment filters
+include **Status**, **Justification**, **Supplier** when supplier data exists,
+and **Outdated**. The custom-assessment tab also provides **AI review**
+(agreed, differed, stale, or no AI review); a multi-target row matches when any
+target has the selected review state. **Copy assessment id** copies the stored
+row's ID for an agent review. A **Reset Filters** button clears everything back
+to defaults. See [AI Assessments](ai-assessments.md) for review workflows and
+context-outdated warnings.
 
 ### Import and Export
 
 Two buttons in the toolbar handle review portability:
 
-- **Import Review**: choose either an OpenVEX JSON document or a VulnScout JSON file. OpenVEX imports assessments into one selected variant. VulnScout JSON restores all included assessments, custom CVSS scores, and time estimates using the variants recorded in the file.
-- **Export Review**: choose **Normal export** to create a new file, or **Append/update existing file** to upload a previous export and preserve its stable ordering for smaller Git diffs. The existing file automatically selects VulnScout JSON or OpenVEX. VulnScout JSON exports assessments, custom CVSS scores, and time estimates for selected variants; OpenVEX exports assessments for one selected variant. Append/update replaces changed records, appends new records, and removes data for variants that are not currently selected.
+- **Import**: choose an OpenVEX JSON document or a VulnScout JSON file.
+  OpenVEX imports custom assessments into one selected variant. VulnScout JSON
+  restores custom assessments, pending AI assessments, custom CVSS scores, and
+  time estimates using the variants recorded in the file. Choose original or
+  current assessment timestamps; the defaults are original for OpenVEX and
+  current for VulnScout JSON.
+- **Export**: choose **Normal export** or **Append/update existing file**.
+  Uploading a previous export selects its format and preserves stable ordering
+  for smaller Git diffs. VulnScout JSON includes custom and pending AI
+  assessments, CVSS scores, and time estimates for selected variants; OpenVEX
+  includes only custom assessments for one selected variant. Append/update
+  replaces changed records, appends new records, and removes data for variants
+  that are not currently selected.
+
+See [VulnScout JSON format](custom-data-format.md) for the portable version 2
+target representation.
+
+---
+
+## Metrics
+
+The Metrics dashboard summarizes vulnerabilities by severity, triage status,
+and source, with a time-range selector for active vulnerabilities (pending or
+exploitable). Click a severity or status pie-chart segment to open the
+Vulnerability Table with that filter. The dashboard also lists the most
+critical unfixed vulnerabilities and most vulnerable packages in the current
+scope.
+
+## Settings and Assessment Transfer
+
+**Settings** has **General Settings**, **Transfer Assessments**, **Custom
+reports & assets**, and a project/variant tree. Manage report metadata,
+provider refresh intervals, the NVD API key, and Grype memory limits in General
+Settings. Use the tree to create, rename, or delete projects and variants;
+deletion requires confirmation. Selecting a variant opens its **Import SBOM**
+section, which stages one or more files and optionally refreshes vulnerability
+data afterward.
+
+Use **Transfer Assessments → Copy Custom Assessments** to reuse decisions between variants
+of a selected project or between package versions in one variant. Choose an
+exact version match, matching major/minor or major versions, or any version;
+exact matching is not offered within one variant. Copy only where the target
+has no custom assessment, or also when its status/content differs. **Preview &
+Copy** lets you review and select candidate decisions before applying them.
+
+Use **Custom reports & assets** to upload/manage report templates and image
+assets. See [Writing Report Templates](templates.md) for supported formats.
+
+## AI Context and Agent
+
+The **AI Context** page records the project description and each variant's
+description, local codebase path(s), environment, threat model, risks, and other
+information. It also imports/exports context separately from review decisions.
+The **Agent** button opens a local assistant, and a vulnerability's **AI**
+button opens its own assessment conversation. See [AI Assessments](ai-assessments.md)
+and [Agent chat](agent-chat.md) for setup, scope, and approval behavior.

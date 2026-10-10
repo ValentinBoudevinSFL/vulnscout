@@ -14,7 +14,7 @@ request an AI second opinion on existing user-authored assessments.
 
 ## How it works
 
-Three pieces work together:
+The following pieces work together:
 
 - **VulnScout** — runs the API and web interface, stores assessments, and
   provides the review UI.
@@ -66,8 +66,9 @@ replaced.
 `vulnscout_mcp` speaks MCP over stdio and is launched as a subprocess by the
 agent client — there is no port or daemon to manage yourself. Its
 `vulnscout_mcp/run_server.py` launcher is self-bootstrapping: on first run it
-creates a local `venv/`, installs runtime dependencies from
-`requirements/mcp.txt`, and then starts the server.
+creates a local `venv/`, then starts the server. On every launch it synchronizes
+runtime dependencies from `requirements/mcp.txt`, including when the virtual
+environment already exists.
 
 The server reads a single environment variable:
 
@@ -77,15 +78,7 @@ The server reads a single environment variable:
 
 ### GitHub Copilot CLI
 
-Add the server from the terminal:
-
-```bash
-copilot mcp add vulnscout \
-  --env VULNSCOUT_BASE_URL=http://localhost:7275 \
-  -- python3 /path/to/vulnscout/vulnscout_mcp/run_server.py
-```
-
-Or run `/mcp add` in interactive mode and fill in the form (**Type:** STDIO,
+Run `/mcp add` in interactive mode and fill in the form (**Type:** STDIO,
 **Command:** `python3 /path/to/vulnscout/vulnscout_mcp/run_server.py`,
 **Environment Variables:** `{"VULNSCOUT_BASE_URL":"http://localhost:7275"}`).
 
@@ -142,9 +135,9 @@ Once configured, the agent can call these tools (prefixed with `vulnscout-`):
 | `get_vulnerability`        | Retrieve a vulnerability with variant-scoped details        |
 | `find_project_id` / `find_variant_id` | Resolve a project / variant by name             |
 | `list_variants`            | List every variant across all projects                      |
-| `get_merged_context`       | Fetch the merged project + variant context (project description plus variant description, environment, threat model, risks, other info) |
+| `get_merged_context`       | Fetch merged project + variant context, including codebase path(s) and attached file names |
 | `get_project_context` / `update_project_context` | Read / replace a project's description |
-| `update_variant_context`   | Replace a variant's context fields (description, environment, threat model, risks, other info) — full replacement, not a partial update |
+| `update_variant_context`   | Replace a variant's context fields (description, codebase path(s), environment, threat model, risks, other info) — full replacement, not a partial update |
 | `get_custom_assessment`    | Fetch one user-authored assessment and its per-target reviews |
 | `list_custom_assessments`  | List user-authored assessments, optionally scoped to a project variant |
 | `write_assessment_review`  | Record an AI second opinion for one (variant, package) target |
@@ -198,6 +191,51 @@ different verdict get their own assessment. The skill finishes with a summary of
 every group, the assessment ids, any skipped variants, and any pending AI
 assessments it replaced.
 
+### Confidence and Strict Assessments
+
+By default, **HIGH** and **MEDIUM** confidence can yield a definitive status;
+**LOW** confidence always yields `under_investigation`. Explicitly request a
+**strict assessment** to require HIGH confidence for a definitive status:
+MEDIUM and LOW then both yield `under_investigation`. Confidence and unresolved
+uncertainties are recorded in `status_notes`.
+
+Multi-variant submissions are grouped by their submitted status and, for
+`not_affected`, justification. Per-variant reasoning is merged into the shared
+assessment text; variants with different conclusions receive separate records.
+
+### Managing AI Context
+
+Use the **AI Context** page to save a project description and each variant's
+description, codebase path(s), environment, threat model, risks, and other
+information. The project description and variant threat model are required
+when saving a complete variant context. Separate multiple local source paths
+with semicolons. External agents can use those paths when the corresponding
+source trees are available on their machine; the built-in chat exposes only
+VulnScout MCP tools, not filesystem or shell tools.
+
+Changing saved context can mark pending AI assessments as **context outdated**.
+They remain pending and should be regenerated against the updated context.
+This differs from a **stale AI review**, which means the custom assessment
+content changed after the review.
+
+Context import/export is separate from Review-page exports. The web UI can
+export all or selected variants; the host wrapper exports the selected project
+(all its variants unless `--variant` is set):
+
+```bash
+./vulnscout --project demo --export-context
+./vulnscout --import-context /path/to/context-export.json
+```
+
+The current context envelope has `version: "1.0"`, `exported_at`, and a
+`projects` array. Each project has `project_name`, `project_description`, and
+nested `variants`; each variant has `variant_name`, `variant_description`,
+`codebase_path`, `environment`, `threat_model`, `risks`, and `other_info`.
+Import also accepts a bare array of those project objects. Matching context
+is overwritten; missing destination projects/variants are reported as ignored,
+and entries lacking required description/threat-model fields are reported as
+failed. Valid entries can still be imported when other entries fail.
+
 ```{note}
 The skill's **security objectives profiles** and **report templates** are
 customizable. See `.github/skills/cve-assessment/objectives/README.md` and the
@@ -224,8 +262,13 @@ Pending AI assessments must be reviewed by a human before they become official.
      the OpenVEX export.
    - **Reject** — deletes the pending AI assessment.
 
+Alternatively, use the **Review → AI Assessments** tab to inspect and
+approve/reject pending suggestions without opening every vulnerability modal.
+
 Until it is approved, a pending AI assessment has no effect on the
-vulnerability's status, on scan history/diffs, or on any exported VEX.
+vulnerability's status, on scan history/diffs, reports, or exported SBOM/VEX.
+Custom VulnScout JSON backups include pending suggestions separately in
+`ai_assessments`; importing them does not approve them.
 
 ---
 
