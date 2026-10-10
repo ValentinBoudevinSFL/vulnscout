@@ -58,6 +58,9 @@ class FastSPDX ():
         licences = _get_field(pkg, ["licenseDeclared", "LicenseDeclared"])
 
         package = Package(name, version or "", [], [], licences or "")
+        download = _get_field(pkg, ["downloadLocation"])
+        if isinstance(download, str):
+            package.add_source_url(download)
 
         for external_ref in _get_field(pkg, ["externalRefs"]) or []:
             ref_type = _get_field(external_ref, ["referenceType"])
@@ -80,6 +83,8 @@ class FastSPDX ():
         self._check_spdx_version(spdx)
         self._merge_packages(spdx)
         edges = set()
+        derivations = set()
+        inputs = set()
         for relation in _get_field(spdx, ["relationships", "Relationships"]) or []:
             if not isinstance(relation, dict):
                 continue
@@ -87,6 +92,12 @@ class FastSPDX ():
                                          relation.get("relatedSpdxElement"))
             if edge:
                 edges.add(edge)
+            source, target = relation.get("spdxElementId"), relation.get("relatedSpdxElement")
+            if isinstance(source, str) and isinstance(target, str):
+                if relation.get("relationshipType") == "GENERATED_FROM":
+                    derivations.add((source, target))
+                elif relation.get("relationshipType") == "BUILD_DEPENDENCY_OF":
+                    inputs.add((target, source))
         external_documents = {
             ref["externalDocumentId"]: ref["spdxDocument"]
             for ref in _get_field(spdx, ["externalDocumentRefs"]) or []
@@ -96,6 +107,17 @@ class FastSPDX ():
         namespace = _get_field(spdx, ["documentNamespace"])
         self.packagesCtrl.add_spdx_dependencies(namespace if isinstance(namespace, str) else None,
                                                 self._document_refs, external_documents, edges)
+        urls = {
+            ref: url
+            for package in _get_field(spdx, ["packages", "Packages"]) or []
+            for ref, url in [(_get_field(package, ["SPDXID", "spdxId"]),
+                              _get_field(package, ["downloadLocation"]))]
+            if isinstance(ref, str) and isinstance(url, str)
+        }
+        self.packagesCtrl.add_spdx_sources(
+            namespace if isinstance(namespace, str) else None,
+            self._document_refs, external_documents, urls, derivations, inputs,
+        )
 
 
 def _get_field(obj: dict, field: list[str]):

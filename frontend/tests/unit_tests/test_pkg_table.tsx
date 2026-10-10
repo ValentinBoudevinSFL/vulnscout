@@ -207,11 +207,21 @@ describe('Packages Table', () => {
     test('search matches the displayed release version and full source revision', async () => {
         const user = userEvent.setup();
         const revision = 'b'.repeat(40);
-        render(<TablePackages packages={[{...packages[0], id: `aaabbbccc@${revision}`, version: revision,
-            release_version: '4.1.1', source_revision: revision, purl: ['pkg:generic/aaabbbccc@v4.1.1']},
+        const url = `git+https://example.org/lib.git@${revision}`;
+        render(<TablePackages packages={[{...packages[0],
+            release_version: '4.1.1', source_revision: revision, purl: ['pkg:generic/aaabbbccc@v4.1.1'],
+            version_evidence: [{source: 'download', version: revision, identifier: url}]},
             packages[1]]} />);
         const input = screen.getByLabelText('Search');
         await user.type(input, '4.1.1{Enter}');
+        await waitFor(() => expect(screen.queryByText('xxxyyyzzz')).toBeNull());
+        expect(screen.getByText('aaabbbccc')).toBeTruthy();
+        await user.clear(input);
+        await user.type(input, `-${revision}{Enter}`);
+        await waitFor(() => expect(screen.queryByText('aaabbbccc')).toBeNull());
+        expect(screen.getByText('xxxyyyzzz')).toBeTruthy();
+        await user.clear(input);
+        await user.type(input, `${url}{Enter}`);
         await waitFor(() => expect(screen.queryByText('xxxyyyzzz')).toBeNull());
         expect(screen.getByText('aaabbbccc')).toBeTruthy();
         await user.clear(input);

@@ -295,6 +295,135 @@ def _yocto_archive():
 
 
 @pytest.mark.parametrize('ignore_parsing_errors', ['false', 'true'])
+@pytest.mark.parametrize('reverse', [False, True])
+def test_yocto_spdx2_source_revisions_resolve_recipes_without_toolchain_contamination(
+        app, tmp_path, monkeypatch, ignore_parsing_errors, reverse):
+    monkeypatch.setenv('IGNORE_PARSING_ERRORS', ignore_parsing_errors)
+    revision, compiler_revision = 'a' * 40, 'b' * 40
+    url = f'git+https://example.org/glibc.git@{revision}'
+    recipe = _yocto_spdx2('recipe-glibc', packages=(
+        ('SPDXRef-Recipe-glibc', 'glibc'), ('SPDXRef-Download-glibc', 'glibc-source'),
+    ), refs=(('DocumentRef-compiler', 'recipe-compiler'),), relationships=(
+        ('SPDXRef-Download-glibc', 'BUILD_DEPENDENCY_OF', 'SPDXRef-Recipe-glibc'),
+        ('DocumentRef-compiler:SPDXRef-Recipe-compiler', 'BUILD_DEPENDENCY_OF', 'SPDXRef-Recipe-glibc'),
+    ))
+    recipe['packages'][0]['versionInfo'] = '2.41+git'
+    recipe['packages'][1].pop('versionInfo')
+    recipe['packages'][1]['downloadLocation'] = url
+    binary = _yocto_spdx2('libc6', packages=(('SPDXRef-Package-libc6', 'libc6'),),
+                         refs=(('DocumentRef-glibc', 'recipe-glibc'),), relationships=(
+                             ('SPDXRef-Package-libc6', 'GENERATED_FROM',
+                              'DocumentRef-glibc:SPDXRef-Recipe-glibc'),
+                         ))
+    binary['packages'][0]['versionInfo'] = '2.41+git'
+    binary['packages'][0]['checksums'] = [{'algorithm': 'SHA1', 'checksumValue': 'f' * 40}]
+    compiler = _yocto_spdx2('recipe-compiler', packages=(
+        ('SPDXRef-Recipe-compiler', 'compiler'), ('SPDXRef-Download-compiler', 'compiler-source'),
+    ), relationships=(('SPDXRef-Download-compiler', 'BUILD_DEPENDENCY_OF', 'SPDXRef-Recipe-compiler'),))
+    compiler['packages'][1].pop('versionInfo')
+    compiler['packages'][1]['downloadLocation'] = f'git+https://example.org/compiler.git@{compiler_revision}'
+    unrelated = _yocto_spdx2('other-libc', packages=(('SPDXRef-other', 'other-libc'),),
+                            refs=(('DocumentRef-glibc', 'recipe-glibc'),), relationships=(
+                                ('SPDXRef-other', 'GENERATED_FROM', 'DocumentRef-glibc:SPDXRef-Recipe-glibc'),
+                            ))
+    with app.app_context():
+        project = Project.create('yocto-source')
+        variant = Variant.create('default', project.id)
+        scan = Scan.create('SBOM', variant.id)
+        scan_id, variant_id = scan.id, variant.id
+        documents = [('recipe', recipe), ('binary', binary), ('compiler', compiler)]
+        for name, document in reversed(documents) if reverse else documents:
+            path = tmp_path / f'{name}.spdx.json'
+            path.write_text(json.dumps(document))
+            SBOMDocument.create(str(path), path.name, scan.id, format='spdx')
+        other_variant = Variant.create('other', project.id)
+        other_scan = Scan.create('SBOM', other_variant.id)
+        path = tmp_path / 'other.spdx.json'
+        path.write_text(json.dumps(unrelated))
+        SBOMDocument.create(str(path), path.name, other_scan.id, format='spdx')
+        read_inputs(ControllersCache())
+        db.session.remove()
+        libc = Package.get_by_string_id('libc6@2.41')
+        assert libc.source_urls == [url]
+        assert libc.version_info['release_version'] == '2.41'
+        assert libc.version_info['source_revision'] == revision
+        assert not libc.version_info['revision_conflict']
+        assert Package.get_by_string_id('glibc@2.41').source_urls == [url]
+        assert Package.get_by_string_id('compiler@1.0').version_info['source_revision'] == compiler_revision
+        assert Package.get_by_string_id('other-libc@1.0').source_urls == []
+        read_inputs(ControllersCache(), scan_id)
+        assert Package.get_by_string_id('libc6@2.41').source_urls == [url]
+
+    client = app.test_client()
+    result = client.get(f'/api/packages?variant_id={variant_id}&format=list').json
+    libc = next(package for package in result if package['name'] == 'libc6')
+    assert libc['source_revision'] == revision
+    assert libc['version_evidence'][-1] == {'source': 'download', 'version': revision, 'identifier': url}
+    graph = client.get(f'/api/package-dependencies?variant_id={variant_id}').json
+    assert next(pkg for doc in graph['documents'] for pkg in doc['packages']
+                if pkg['name'] == 'libc6')['source_revision'] == revision
+
+
+@pytest.mark.parametrize('multiple_sources', [False, True])
+def test_yocto_spdx3_source_build_outputs_preserve_provenance_without_image_or_checksum_inheritance(
+        app, tmp_path, multiple_sources):
+    revision = 'a' * 40
+    urls = [f'git+https://example.org/glibc.git@{revision}']
+    if multiple_sources:
+        urls.append(f'git+https://example.org/config.git@{"b" * 40}')
+    sources = _zephyr_spdx3([
+        {'type': 'build_Build', 'spdxId': 'zephyr:build/recipe'},
+        *({'type': 'software_Package', 'spdxId': f'zephyr:source/{i}',
+           'name': f'source-{i}', 'software_primaryPurpose': 'source', 'software_downloadLocation': url}
+          for i, url in enumerate(urls)),
+        {'type': 'software_File', 'spdxId': 'zephyr:patch', 'name': 'patch',
+         'verifiedUsing': [{'type': 'Hash', 'algorithm': 'sha1', 'hashValue': 'f' * 40}]},
+    ])
+    # This is a Yocto document, not West: source nodes must remain filtered.
+    sources['@graph'] = [item for item in sources['@graph'] if item.get('type') != 'SoftwareAgent']
+    build = _zephyr_spdx3([
+        {'type': 'build_Build', 'spdxId': 'zephyr:build/image'},
+        {'type': 'software_Package', 'spdxId': 'zephyr:binary', 'name': 'libc6',
+         'software_packageVersion': '2.41+git', 'software_primaryPurpose': 'install'},
+        {'type': 'software_Package', 'spdxId': 'zephyr:image', 'name': 'image', 'software_packageVersion': '1'},
+        {'type': 'software_Package', 'spdxId': 'zephyr:direct', 'name': 'direct', 'software_packageVersion': '1',
+         'software_downloadLocation': f'git+https://example.org/direct.git@{"c" * 40}'},
+        {'type': 'Relationship', 'from': 'https://example.org/zephyr/build/recipe', 'relationshipType': 'hasInput',
+         'to': [*(f'zephyr:source/{i}' for i in range(len(urls))), 'zephyr:patch']},
+        {'type': 'Relationship', 'from': 'zephyr:build/recipe', 'relationshipType': 'hasOutput', 'to': 'zephyr:binary'},
+        {'type': 'Relationship', 'from': 'zephyr:build/image', 'relationshipType': 'hasInput',
+         'to': ['zephyr:binary', 'zephyr:direct']},
+        {'type': 'Relationship', 'from': 'zephyr:build/image', 'relationshipType': 'hasOutput', 'to': ['zephyr:image']},
+        {'type': 'Relationship', 'from': 'zephyr:unknown-build', 'relationshipType': 'hasInput',
+         'to': ['zephyr:source/0']},
+        {'type': 'Relationship', 'from': 'zephyr:unknown-build', 'relationshipType': 'hasOutput',
+         'to': ['zephyr:image']},
+    ])
+    with app.app_context():
+        project = Project.create('yocto-spdx3-source')
+        variant = Variant.create('default', project.id)
+        scan = Scan.create('SBOM', variant.id)
+        scan_id = scan.id
+        for name, document in [('build', build), ('sources', sources)]:
+            path = tmp_path / f'{name}.jsonld'
+            path.write_text(json.dumps(document))
+            SBOMDocument.create(str(path), path.name, scan.id, format='spdx')
+        read_inputs(ControllersCache(), scan_id)
+        db.session.remove()
+        assert len(Package.get_all()) == 3
+        binary = Package.get_by_string_id('libc6@2.41')
+        assert binary.source_urls == sorted(urls)
+        assert binary.version_info['release_version'] == '2.41'
+        assert binary.version_info['source_revision'] == (None if multiple_sources else revision)
+        assert binary.version_info['revision_conflict'] == multiple_sources
+        assert Package.get_by_string_id('direct@1').version_info['source_revision'] == 'c' * 40
+        assert Package.get_by_string_id('image@1').source_urls == []
+        assert db.session.query(PackageDependency).count() == 0
+        read_inputs(ControllersCache(), scan_id)
+        assert Package.get_by_string_id('libc6@2.41').source_urls == sorted(urls)
+
+
+@pytest.mark.parametrize('ignore_parsing_errors', ['false', 'true'])
 def test_yocto_spdx2_dependencies_resolve_across_documents_of_one_scan(
         app, tmp_path, monkeypatch, ignore_parsing_errors):
     monkeypatch.setenv('IGNORE_PARSING_ERRORS', ignore_parsing_errors)

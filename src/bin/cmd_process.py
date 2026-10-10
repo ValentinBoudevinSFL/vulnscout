@@ -256,6 +256,7 @@ def read_inputs(controllers: ControllersCache, scan_id=None):
         finally:
             pkgCtrl.current_sbom_document = None
     pkgCtrl.flush_spdx_dependencies()
+    pkgCtrl.flush_spdx_sources()
     _db.session.commit()
 
     return {

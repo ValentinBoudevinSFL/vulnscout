@@ -107,6 +107,8 @@ class SPDX:
                 verbose(f"[SPDX.merge_components] failed to read supplier for {package.name!r}")
 
             pkg = Package(package.name, package.version or "", [], [], "", supplier=supplier)
+            if isinstance(package.download_location, str):
+                pkg.add_source_url(package.download_location)
             license_declared = package.license_declared
             if license_declared is not None:
                 license_str = str(license_declared)
@@ -132,15 +134,28 @@ class SPDX:
         """Parse the SBOM and merge it into the controller."""
         self.merge_components_into_controller()
         edges = set()
+        derivations = set()
+        inputs = set()
         for relation in self.sbom.relationships:
             edge = spdx2_dependency_edge(relation.spdx_element_id, relation.relationship_type.name,
                                          relation.related_spdx_element_id)
             if edge:
                 edges.add(edge)
+            source, target = relation.spdx_element_id, relation.related_spdx_element_id
+            if isinstance(target, str):
+                if relation.relationship_type == RelationshipType.GENERATED_FROM:
+                    derivations.add((source, target))
+                elif relation.relationship_type == RelationshipType.BUILD_DEPENDENCY_OF:
+                    inputs.add((target, source))
         creation_info = self.sbom.creation_info
         external_documents = {ref.document_ref_id: ref.document_uri for ref in creation_info.external_document_refs}
         self.packagesCtrl.add_spdx_dependencies(creation_info.document_namespace, self._document_refs,
                                                 external_documents, edges)
+        urls = {package.spdx_id: package.download_location for package in self.sbom.packages
+                if isinstance(package.download_location, str)}
+        self.packagesCtrl.add_spdx_sources(
+            creation_info.document_namespace, self._document_refs, external_documents, urls, derivations, inputs,
+        )
 
     def register_components(self, with_cpe=False):
         """
@@ -178,6 +193,17 @@ class SPDX:
                         )
 
                 self.sbom.packages = self.sbom.packages + [package]
+                for url in pkg.source_urls or []:
+                    source_id = f"SPDXRef-{uuid7(as_type='str')}"
+                    self.sbom.packages.append(SpdxPackage(
+                        name=f"{pkg.name}-source", spdx_id=source_id,
+                        primary_package_purpose=PackagePurpose.SOURCE,
+                        download_location=url, files_analyzed=False,
+                    ))
+                    self.sbom.relationships.append(Relationship(
+                        spdx_element_id=package.spdx_id, relationship_type=RelationshipType.GENERATED_FROM,
+                        related_spdx_element_id=source_id,
+                    ))
                 self.sbom.relationships = self.sbom.relationships + [
                     Relationship("SPDXRef-DOCUMENT", RelationshipType.DESCRIBES, newid)
                 ]

@@ -146,7 +146,8 @@ def init_app(app: Flask) -> None:
                 .join(SBOMDocument, SBOMDocument.id == SBOMPackage.sbom_document_id)
                 .join(Package, Package.id == SBOMPackage.package_id)
                 .where(SBOMDocument.scan_id.in_(scan_ids))
-                .options(load_only(Package.name, Package.version, Package.supplier, Package.cpe, Package.purl))
+                .options(load_only(Package.name, Package.version, Package.supplier, Package.cpe, Package.purl,
+                                   Package.source_urls))
             )
         ]
         if allowed_ids is not None:

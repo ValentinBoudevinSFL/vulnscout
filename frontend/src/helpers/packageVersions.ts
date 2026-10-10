@@ -1,6 +1,6 @@
 export type VersionEvidence = {
     version: string;
-    source: 'sbom' | 'purl' | 'cpe';
+    source: 'sbom' | 'purl' | 'cpe' | 'download';
     identifier: string;
 };
 
@@ -15,7 +15,7 @@ export type PackageVersionMetadata = {
 export function asVersionEvidence(value: unknown): VersionEvidence[] {
     if (!value || typeof value !== 'object' || !('version' in value) || !('source' in value)
         || !('identifier' in value) || typeof value.version !== 'string' || typeof value.identifier !== 'string') return [];
-    if (value.source !== 'sbom' && value.source !== 'purl' && value.source !== 'cpe') return [];
+    if (value.source !== 'sbom' && value.source !== 'purl' && value.source !== 'cpe' && value.source !== 'download') return [];
     return [{ version: value.version, source: value.source, identifier: value.identifier }];
 }
 
@@ -26,7 +26,8 @@ export function releaseVersion(pkg: PackageVersionMetadata & { version: string }
 
 export function versionEvidenceTitle(pkg: PackageVersionMetadata): string {
     return (pkg.version_evidence ?? []).map(item => {
-        const source = item.source === 'sbom' ? 'SBOM version' : item.source.toUpperCase();
+        const source = item.source === 'sbom' ? 'SBOM version'
+            : item.source === 'download' ? 'Git source URL' : item.source.toUpperCase();
         return `${source}: ${item.version}${item.source === 'sbom' ? '' : ` (${item.identifier})`}`;
     }).join('\n');
 }

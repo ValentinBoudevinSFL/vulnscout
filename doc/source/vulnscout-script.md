@@ -198,6 +198,15 @@ same scan. `contains`, `hasVariant`, file-level static links, and build input/ou
 relationships are not treated as package dependencies. A module manifest dependency
 does not by itself mean that the module was linked into the final firmware.
 
+Yocto Git source download URLs pinned to full commits also populate **Source
+revision**: SPDX2 follows source-to-recipe `BUILD_DEPENDENCY_OF` and binary-to-recipe
+`GENERATED_FROM` links, including external recipe documents; SPDX3 follows source
+inputs and package outputs of builds. These provenance links do not add dependency
+edges. Multiple Git source revisions are retained and reported as conflicting,
+not guessed from repository names. File checksums and verification codes are ignored.
+Existing databases require `db upgrade` and reimporting their SBOM files to acquire
+this previously unstored URL evidence.
+
 ---
 
 ### CycloneDX SBOM

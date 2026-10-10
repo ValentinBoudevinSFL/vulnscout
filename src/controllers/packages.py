@@ -7,6 +7,7 @@ from sqlalchemy import tuple_
 
 from ..models import Package, Finding, SBOMDocument, SBOMPackage, PackageDependency
 from ..helpers.verbose import verbose
+from ..helpers.spdx_sources import SPDXSources, SourceKey
 from ..extensions import db
 from ._base import to_dict_with_fallback
 
@@ -56,6 +57,7 @@ class PackagesController:
         self._spdx_documents: dict[uuid.UUID, uuid.UUID] = {}
         self._spdx_edges: list[tuple[uuid.UUID, str, str]] = []
         self._pending_spdx_edges: list[tuple[uuid.UUID, SpdxKey, SpdxKey]] = []
+        self._source_provenance = SPDXSources()
 
     def _preload_cache(self) -> None:
         """Bulk-load all packages from the DB into the session caches.
@@ -232,6 +234,59 @@ class PackagesController:
         if stale or added:
             db.session.commit()
 
+    def add_spdx_sources(self, namespace: str | None, references: dict[str, str],
+                         external_documents: dict[str, str], urls: dict[str, str],
+                         derivations: set[tuple[str, str]], inputs: set[tuple[str, str]]) -> None:
+        """Queue SPDX 2 source/recipe provenance, including external recipe references."""
+        document = self._current_sbom_document
+        local_namespace = namespace or str(document.id if document else uuid.uuid4())
+
+        def key(ref: str) -> SourceKey:
+            return _spdx_key(ref, local_namespace, external_documents) or (local_namespace, ref)
+
+        self._record_sources({key(ref): sid for ref, sid in references.items()},
+                             {key(ref): url for ref, url in urls.items()},
+                             {(key(derived), key(origin)) for derived, origin in derivations},
+                             {(key(derived), key(origin)) for derived, origin in inputs})
+
+    def add_spdx3_sources(self, references: dict[str, str], namespaces: dict[str, str], urls: dict[str, str],
+                          derivations: set[tuple[str, str]], inputs: set[tuple[str, str]],
+                          builds: set[str]) -> None:
+        """Queue SPDX 3 source/build/output provenance using namespace-qualified URIs."""
+        local_namespace = str(self._current_sbom_document.id if self._current_sbom_document else uuid.uuid4())
+
+        def key(ref: str) -> SourceKey:
+            return _spdx3_key(ref, namespaces) or (local_namespace, ref)
+
+        self._record_sources({key(ref): sid for ref, sid in references.items()},
+                             {key(ref): url for ref, url in urls.items()},
+                             {(key(derived), key(origin)) for derived, origin in derivations},
+                             {(key(derived), key(origin)) for derived, origin in inputs},
+                             {key(ref) for ref in builds})
+
+    def _record_sources(self, references: dict[SourceKey, str], urls: dict[SourceKey, str],
+                        derivations: set[tuple[SourceKey, SourceKey]],
+                        inputs: set[tuple[SourceKey, SourceKey]], builds: set[SourceKey] | None = None) -> None:
+        document = self._current_sbom_document
+        self._source_provenance.record(document.scan_id if document else None, references, urls,
+                                       derivations, inputs, builds)
+        if document is None:
+            self._apply_source_provenance()
+
+    def _apply_source_provenance(self) -> None:
+        for package_id, urls in self._source_provenance.resolve().items():
+            if not urls:
+                continue
+            package = self.get(package_id)
+            if package is not None:
+                for url in sorted(urls):
+                    package.add_source_url(url)
+
+    def flush_spdx_sources(self) -> None:
+        """Resolve companion documents after import; persist provenance through the scan transaction."""
+        self._apply_source_provenance()
+        self._source_provenance = SPDXSources()
+
     # ------------------------------------------------------------------
     # Core mutators
     # ------------------------------------------------------------------
@@ -271,6 +326,7 @@ class PackagesController:
                         list(package.purl or []),
                         package.licences or "",
                         supplier=package.supplier or "",
+                        source_urls=list(package.source_urls or []),
                     )
                     # Keep caches in sync with DB object
                     self._cache[string_id] = db_pkg
@@ -343,6 +399,7 @@ class PackagesController:
                 v.get("purl", []),
                 v.get("licences", ""),
                 supplier=v.get("supplier", ""),
+                source_urls=v.get("source_urls", []),
             )
             ctrl.add(pkg)
         return ctrl

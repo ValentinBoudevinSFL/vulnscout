@@ -24,7 +24,11 @@ import { releaseVersion, versionEvidenceTitle } from '../helpers/packageVersions
 
 const DependencyModal = lazy(() => import('../components/DependencyModal'));
 
-type PackageRow = Package & { dependencyCount?: { in: number; out: number }; dependenciesUnrecorded?: boolean };
+type PackageRow = Package & {
+    versionMetadataSearch: string;
+    dependencyCount?: { in: number; out: number };
+    dependenciesUnrecorded?: boolean;
+};
 
 type Props = {
     packages: Package[];
@@ -57,7 +61,7 @@ const sortVunerabilitiesFn = (rowA: Row<Package>, rowB: Row<Package>, ignore: st
     return vulnsA - vulnsB
 }
 
-const fuseKeys = ['id', 'name', 'version', 'cpe', 'purl']
+const fuseKeys = ['id', 'name', 'version', 'cpe', 'purl', 'versionMetadataSearch']
 const emptyVulnerabilities: Vulnerability[] = [];
 
 function TablePackages({ packages, vulnerabilities = emptyVulnerabilities, onShowVulns, onLoadOutdatedPackages,
@@ -593,13 +597,14 @@ function TablePackages({ packages, vulnerabilities = emptyVulnerabilities, onSho
 
     // Counts live in the row data so an active sort re-runs when they arrive.
     const tableRows = useMemo<PackageRow[]>(() => {
-        if (!showDependencyColumn || !dependencyCounts) return filteredPackages;
-        const unrecorded = new Set(dependencyCounts.unrecorded);
+        const unrecorded = new Set(dependencyCounts?.unrecorded);
         return filteredPackages.map(pkg => {
-            if (pkg.outdated) return pkg;
+            const row = { ...pkg, versionMetadataSearch:
+                `${pkg.id} ${pkg.source_revision ?? ''} ${versionEvidenceTitle(pkg)}` };
+            if (!showDependencyColumn || !dependencyCounts || pkg.outdated) return row;
             const counts = dependencyCounts.counts[pkg.id];
-            if (!counts && unrecorded.has(pkg.id)) return { ...pkg, dependenciesUnrecorded: true };
-            return { ...pkg, dependencyCount: counts ?? { in: 0, out: 0 } };
+            if (!counts && unrecorded.has(pkg.id)) return { ...row, dependenciesUnrecorded: true };
+            return { ...row, dependencyCount: counts ?? { in: 0, out: 0 } };
         });
     }, [filteredPackages, showDependencyColumn, dependencyCounts]);
 

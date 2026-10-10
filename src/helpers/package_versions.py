@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 class VersionEvidence(TypedDict):
     version: str
-    source: Literal["sbom", "purl", "cpe"]
+    source: Literal["sbom", "purl", "cpe", "download"]
     identifier: str
 
 
@@ -30,6 +30,16 @@ class PackageVersionInfo(TypedDict):
 def is_source_revision(value: str) -> bool:
     """Recognize full SHA-1/SHA-256 revisions, not ambiguous short hexadecimal versions."""
     return re.fullmatch(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})", value) is not None
+
+
+def git_revision_from_url(value: str) -> str | None:
+    """Extract an explicitly pinned Git revision, never an archive or file checksum."""
+    match = re.fullmatch(
+        r"(?:git\+(?:https?|ssh|git|file)|git)://[^?#]+@"
+        r"([0-9a-fA-F]{40}|[0-9a-fA-F]{64})(?:[?#].*)?",
+        value.strip(),
+    )
+    return match.group(1).lower() if match else None
 
 
 def _release_key(value: str) -> str:
@@ -53,7 +63,8 @@ def _cpe_version(identifier: str) -> str | None:
     return None
 
 
-def package_version_info(version: str | None, purls: list[str], cpes: list[str]) -> PackageVersionInfo:
+def package_version_info(version: str | None, purls: list[str], cpes: list[str],
+                         source_urls: list[str] | None = None) -> PackageVersionInfo:
     """Derive display metadata using only explicit, persisted SBOM identifiers.
 
     Git-style ``v`` prefixes on numeric versions are equivalent. CPE values are
@@ -62,7 +73,7 @@ def package_version_info(version: str | None, purls: list[str], cpes: list[str])
     """
     evidence: list[VersionEvidence] = []
 
-    def add(value: str | None, source: Literal["sbom", "purl", "cpe"], identifier: str) -> None:
+    def add(value: str | None, source: Literal["sbom", "purl", "cpe", "download"], identifier: str) -> None:
         if value is None:
             return
         value = value.strip()
@@ -81,6 +92,8 @@ def package_version_info(version: str | None, purls: list[str], cpes: list[str])
         add(parsed.version, "purl", purl)
     for cpe in cpes:
         add(_cpe_version(cpe), "cpe", cpe)
+    for url in source_urls or []:
+        add(git_revision_from_url(url), "download", url)
 
     releases = [item for item in evidence if not is_source_revision(item["version"])]
     release_keys = {_release_key(item["version"]) for item in releases if item["source"] != "cpe"}

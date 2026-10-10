@@ -15,6 +15,8 @@ test('evidence guards malformed API entries', () => {
     }
     expect(asVersionEvidence({version: '1', source: 'cpe', identifier: 'cpe:...'})).toHaveLength(1);
     expect(asVersionEvidence({version: '1', source: 'sbom', identifier: '1'})).toHaveLength(1);
+    expect(asVersionEvidence({version: 'a'.repeat(40), source: 'download',
+        identifier: 'git+https://example.org/lib.git'})).toHaveLength(1);
 });
 
 test('dependency labels show releases and shortened revisions without changing IDs', () => {
@@ -32,5 +34,7 @@ test('evidence titles retain the original values and identifiers', () => {
         {source: 'sbom', version: 'a'.repeat(40), identifier: 'a'.repeat(40)},
         {source: 'purl', version: 'v1.0', identifier: 'pkg:generic/lib@v1.0'},
         {source: 'cpe', version: '1.0', identifier: 'cpe:...'},
-    ]})).toBe(`SBOM version: ${'a'.repeat(40)}\nPURL: v1.0 (pkg:generic/lib@v1.0)\nCPE: 1.0 (cpe:...)`);
+        {source: 'download', version: 'b'.repeat(40), identifier: 'git+https://example.org/lib.git'},
+    ]})).toBe(`SBOM version: ${'a'.repeat(40)}\nPURL: v1.0 (pkg:generic/lib@v1.0)\nCPE: 1.0 (cpe:...)\n`
+        + `Git source URL: ${'b'.repeat(40)} (git+https://example.org/lib.git)`);
 });

@@ -122,6 +122,38 @@ class FastSPDX3:
                 self._document_refs[spdx_id] = package.string_id
 
             self.packagesCtrl.add(package)
+        self.merge_sources_into_controller(components_dict)
+
+    def merge_sources_into_controller(self, document: Dict[str, Any]) -> None:
+        """Follow Git source inputs through explicit build outputs, not runtime dependencies."""
+        graph = [item for item in document.get("@graph", []) if isinstance(item, dict)]
+        builds = {item['spdxId'] for item in graph
+                  if item.get('type') == 'build_Build' and isinstance(item.get('spdxId'), str)}
+        urls = {
+            item['spdxId']: item['software_downloadLocation']
+            for item in graph
+            if item.get('type') == 'software_Package' and item.get('software_primaryPurpose', '').lower() == 'source'
+            and isinstance(item.get('spdxId'), str) and isinstance(item.get('software_downloadLocation'), str)
+        }
+        derivations: set[tuple[str, str]] = set()
+        inputs: set[tuple[str, str]] = set()
+        for relation in graph:
+            source = relation.get('from')
+            targets = relation.get('to', [])
+            if isinstance(targets, str):
+                targets = [targets]
+            if not isinstance(source, str) or not isinstance(targets, list):
+                continue
+            for target in targets:
+                if not isinstance(target, str):
+                    continue
+                if relation.get('relationshipType') == 'hasInput':
+                    inputs.add((source, target))
+                elif relation.get('relationshipType') == 'hasOutput':
+                    derivations.add((target, source))
+        self.packagesCtrl.add_spdx3_sources(
+            self._document_refs, self._namespace_map(graph), urls, derivations, inputs, builds,
+        )
 
     def _convert_to_package(self, pkg_element: Dict[str, Any]) -> Optional[Package]:
         """
@@ -143,6 +175,9 @@ class FastSPDX3:
             return None
 
         pkg = Package(name, version or "", [], [])
+        download = pkg_element.get('software_downloadLocation')
+        if isinstance(download, str):
+            pkg.add_source_url(download)
 
         cpes = self.extract_cpes(pkg_element)
         for cpe in cpes:
@@ -618,6 +653,9 @@ class FastSPDX3:
                         edges.add((source, target))
                     elif relation == 'dependencyOf':
                         edges.add((target, source))
+        self.packagesCtrl.add_spdx3_dependencies(self._document_refs, self._namespace_map(graph), edges)
+
+    def _namespace_map(self, graph: List[Dict[str, Any]]) -> Dict[str, str]:
         namespaces: Dict[str, str] = {}
         for element in graph:
             if not isinstance(element, dict) or element.get('type') != 'SpdxDocument':
@@ -632,7 +670,7 @@ class FastSPDX3:
                     and isinstance(entry.get('namespace'), str)
                 ):
                     namespaces[entry['prefix']] = entry['namespace']
-        self.packagesCtrl.add_spdx3_dependencies(self._document_refs, namespaces, edges)
+        return namespaces
 
     def parse_from_dict(self, spdx: Dict[str, Any]):
         """

@@ -3,7 +3,7 @@
 
 import pytest
 
-from src.helpers.package_versions import is_source_revision, package_version_info
+from src.helpers.package_versions import git_revision_from_url, is_source_revision, package_version_info
 from src.models.package import Package
 
 
@@ -145,3 +145,35 @@ def test_merging_identifiers_refreshes_display_metadata_without_changing_identit
     assert package.string_id == f"lib@{REVISION}"
     assert package.version_info["version_conflict"]
     assert package.version_info["release_version"] is None
+
+
+@pytest.mark.parametrize("url,expected", [
+    (f"git+https://example.org/repo.git@{REVISION}", REVISION),
+    (f"git+ssh://git@example.org/repo.git@{REVISION.upper()}", REVISION),
+    (f"git://example.org/repo.git@{'a' * 64}?path=src", 'a' * 64),
+    (f"git+http://example.org/repo@{REVISION}#src", REVISION),
+    (f"https://example.org/archive@{REVISION}", None),
+    (f"https://example.org/{REVISION}.tar.gz", None),
+    ("git+https://example.org/repo.git@deadbeef", None),
+    ("git+https://example.org/repo.git@v1.0", None),
+    (f"git+https://example.org/repo.git@{REVISION}a", None),
+    ("NOASSERTION", None),
+])
+def test_only_explicitly_revision_pinned_git_urls_are_parsed(url, expected):
+    assert git_revision_from_url(url) == expected
+
+
+def test_source_urls_supply_revision_evidence_without_changing_identity():
+    url = f"git+https://sourceware.org/git/glibc.git@{REVISION}"
+    package = Package("libc6", "2.41+git", source_urls=[url, url, "NOASSERTION"])
+    assert package.string_id == "libc6@2.41"
+    assert package.source_urls == [url]
+    assert package.version_info["release_version"] == "2.41"
+    assert package.version_info["source_revision"] == REVISION
+    assert package.version_info["version_evidence"][-1] == {
+        "source": "download", "version": REVISION, "identifier": url,
+    }
+    assert Package.from_dict(package.to_dict()).version_info == package.version_info
+    package.merge(Package("libc6", "2.41", source_urls=[f"git+https://example.org/helper@{'b' * 40}"]))
+    assert package.version_info["source_revision"] is None
+    assert package.version_info["revision_conflict"]

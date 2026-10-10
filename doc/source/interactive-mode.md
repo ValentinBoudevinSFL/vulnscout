@@ -83,7 +83,7 @@ The **Columns** dropdown lets you toggle which columns are displayed. The defaul
 **Release version** uses the reported non-hash version and explicit PURL/CPE
 versions. **Source revision** recognizes full 40- or 64-character hexadecimal
 revisions and displays the first 12 characters as plain text, with the full value on hover.
-Hover either value to see the original SBOM/PURL/CPE evidence. Missing releases
+Hover either value to see the original SBOM/PURL/CPE or Git source URL evidence. Missing releases
 are shown as **Unknown**; conflicting values are shown as **Conflicting metadata**,
 not silently selected. Numeric `v` tag prefixes are normalized (for example,
 `v4.1.1` and `4.1.1` agree), and CPE values are compared case-insensitively.
@@ -100,10 +100,22 @@ inspect the original values. A release label and a commit hash are not a conflic
 they describe separate fields. The Source revision column warns only when
 multiple distinct full revisions are supplied.
 
+For Yocto SPDX2, revision-pinned Git download URLs are followed from source
+packages to recipes via `BUILD_DEPENDENCY_OF`, and to binary packages via
+`GENERATED_FROM`, including companion documents in the same scan. For SPDX3,
+Git source package inputs are followed through build `hasInput`/`hasOutput`
+relationships. Runtime dependencies, compiler source revisions, file checksums,
+and package verification codes are not inherited as a binary's source revision.
+When a recipe has multiple Git sources, all their URLs are retained; distinct
+commits display a revision conflict rather than guessing which repository is primary.
+
 These are display fields: the original reported version remains part of the
 package identity, comparisons, assessments, and SBOM exports. Different source
-commits advertising the same release remain distinct packages. Existing database
-rows gain the display metadata without reimporting; no schema migration is needed.
+commits reported as package versions remain distinct packages even if they
+advertise the same release. Source URL evidence does not change package identity.
+Existing PURL/CPE-derived display metadata requires no reimport. Git source URL
+provenance requires the database migration (`flask --app src.bin.webapp db upgrade`)
+and reimporting the original SBOM files.
 
 ### Filters
 

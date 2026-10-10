@@ -99,6 +99,45 @@ def test_controller_from_dict_roundtrip_preserves_supplier(app):
     assert ctrl2.packages[key].supplier == "Organization: Acme Corp"
 
 
+def test_source_urls_persist_and_merge_through_all_package_crud_paths(app):
+    from src.controllers.packages import PackagesController
+    urls = [f"git+https://example.org/repo-{i}.git@{str(i) * 40}" for i in range(1, 5)]
+    package = Package.create("lib", "1.0", source_urls=[urls[0]])
+    package_id = package.id
+    Package.find_or_create("lib", "1.0", source_urls=[urls[0], urls[1], "NOASSERTION"])
+    Package.bulk_find_or_create([{"name": "lib", "version": "1.0", "source_urls": [urls[2]]},
+                                {"name": "new", "version": "1", "source_urls": [urls[0]]}])
+    ctrl = PackagesController()
+    ctrl.add(Package("lib", "1.0", source_urls=[urls[3]]))
+    ctrl.add(Package("lib", "1.0", source_urls=[urls[0]]))
+    _db.session.commit()
+    _db.session.remove()
+    restored = _db.session.get(Package, package_id)
+    assert restored.source_urls == urls
+    assert restored.version_info["revision_conflict"]
+    data = PackagesController.from_dict({"lib@1.0": restored.to_dict()}).to_dict()
+    assert data["lib@1.0"]["source_urls"] == urls
+    assert _db.session.query(Package).count() == 2
+
+
+def test_source_url_migration_preserves_existing_rows(app):
+    import importlib
+    from alembic.migration import MigrationContext
+    from alembic.operations import Operations
+    from sqlalchemy import inspect, text
+
+    migration = importlib.import_module("src.migrations.versions.a9c6e28f3410_add_package_source_urls")
+    Package.create("existing", "1.0")
+    with _db.engine.begin() as connection:
+        with Operations.context(MigrationContext.configure(connection)):
+            migration.downgrade()
+            assert "source_urls" not in {c["name"] for c in inspect(connection).get_columns("packages")}
+            migration.upgrade()
+            assert connection.execute(text("SELECT name, version, source_urls FROM packages")).one() == (
+                "existing", "1.0", None,
+            )
+
+
 def test_controller_current_sbom_document_defaults_to_none(app):
     from src.controllers.packages import PackagesController
     ctrl = PackagesController()
