@@ -22,6 +22,14 @@ def _spdx_key(ref: str, namespace: str | None, external_documents: dict[str, str
     return (namespace, ref) if namespace else None
 
 
+def _spdx3_key(ref: str, namespaces: dict[str, str]) -> SpdxKey | None:
+    """Expand SPDX 3 namespace prefixes; bare references remain document-local."""
+    prefix, separator, element = ref.partition(":")
+    if not separator:
+        return None
+    return ("", namespaces.get(prefix, f"{prefix}:") + element)
+
+
 class PackagesController:
     """
     DB-backed controller for packages.
@@ -166,6 +174,26 @@ class PackagesController:
             target_key = _spdx_key(target, namespace, external_documents)
             if source_key is not None and target_key is not None:
                 self._pending_spdx_edges.append((document.scan_id, source_key, target_key))
+
+    def add_spdx3_dependencies(self, references: dict[str, str], namespaces: dict[str, str],
+                               edges: set[tuple[str, str]]) -> None:
+        """Queue SPDX 3 URI references for resolution across documents of the same scan."""
+        self.add_dependencies(references, edges)
+        document = self._current_sbom_document
+        if document is None:
+            return
+        self._spdx_documents[document.id] = document.scan_id
+        local_namespace = str(document.id)
+        for ref, string_id in references.items():
+            key = _spdx3_key(ref, namespaces) or (local_namespace, ref)
+            self._spdx_refs[(document.scan_id, *key)] = (document.id, string_id)
+        for source, target in edges:
+            if source in references and target in references:
+                self._spdx_edges.append((document.id, references[source], references[target]))
+                continue
+            source_key = _spdx3_key(source, namespaces) or (local_namespace, source)
+            target_key = _spdx3_key(target, namespaces) or (local_namespace, target)
+            self._pending_spdx_edges.append((document.scan_id, source_key, target_key))
 
     def flush_spdx_dependencies(self) -> None:
         """Replace the edges of every queued document; cross-document ones go to the dependent's document."""

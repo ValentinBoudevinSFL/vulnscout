@@ -56,6 +56,196 @@ def _spdx3():
     ]}
 
 
+def _zephyr_spdx3(elements, namespace='https://example.org/zephyr/', prefix='zephyr'):
+    return {'@context': 'https://spdx.org/rdf/3.0.1/spdx-context.jsonld', '@graph': [
+        {'type': 'CreationInfo', 'specVersion': '3.0.1'},
+        {'type': 'SoftwareAgent', 'name': 'West SPDX Generator'},
+        {'type': 'SpdxDocument', 'namespaceMap': [
+            {'type': 'NamespaceMap', 'prefix': prefix, 'namespace': namespace},
+        ]},
+        *elements,
+    ]}
+
+
+def test_zephyr_companion_documents_preserve_versions_and_build_dependencies(app, tmp_path):
+    revision = 'a' * 40
+    release_purl = 'pkg:github/Mbed-TLS/mbedtls@v4.1.1'
+    release_cpe = 'cpe:2.3:a:trustedfirmware:mbed_tls:4.1.1:*:*:*:*:*:*:*'
+    documents = {
+        'app': _zephyr_spdx3([
+            {'type': 'software_Package', 'spdxId': 'zephyr:packages/app-sources',
+             'name': 'app-sources', 'software_primaryPurpose': 'source'},
+        ]),
+        'build': _zephyr_spdx3([
+            *({'type': 'software_Package', 'spdxId': f'zephyr:packages/{name}',
+               'name': name, 'software_primaryPurpose': 'library'}
+              for name in ('app', 'mbedtls', 'tfpsacrypto')),
+            {'type': 'Relationship', 'relationshipType': 'hasPrerequisite',
+             'from': 'zephyr:packages/app', 'to': ['zephyr:packages/mbedtls']},
+            {'type': 'Relationship', 'relationshipType': 'hasPrerequisite',
+             'from': 'zephyr:packages/mbedtls', 'to': ['zephyr:packages/tfpsacrypto']},
+            {'type': 'Relationship', 'relationshipType': 'contains',
+             'from': 'zephyr:packages/app', 'to': ['zephyr:files/libapp.a']},
+            {'type': 'software_File', 'spdxId': 'zephyr:files/libapp.a', 'name': 'libapp.a'},
+            {'type': 'Relationship', 'relationshipType': 'hasStaticLink',
+             'from': 'zephyr:files/libapp.a', 'to': ['zephyr:files/libmbedtls.a']},
+        ]),
+        'modules-deps': _zephyr_spdx3([
+            *({'type': 'software_Package', 'spdxId': f'zephyr:packages/{name}-deps',
+               'name': f'{name}-deps', 'software_packageVersion': revision,
+               'software_primaryPurpose': 'library',
+               'externalIdentifier': [
+                   {'type': 'ExternalIdentifier', 'externalIdentifierType': 'packageUrl',
+                    'identifier': release_purl},
+                   {'type': 'ExternalIdentifier', 'externalIdentifierType': 'cpe23',
+                    'identifier': release_cpe},
+               ] if name == 'mbedtls' else []}
+              for name in ('zephyr', 'mbedtls')),
+            {'type': 'Relationship', 'relationshipType': 'dependsOn',
+             'from': 'zephyr:packages/zephyr-deps', 'to': ['zephyr:packages/mbedtls-deps']},
+        ]),
+        'zephyr': _zephyr_spdx3([
+            {'type': 'software_Package', 'spdxId': 'zephyr:packages/mbedtls-sources',
+             'name': 'mbedtls-sources', 'software_packageVersion': revision,
+             'software_primaryPurpose': 'source'},
+            {'type': 'Relationship', 'relationshipType': 'hasVariant',
+             'from': 'zephyr:packages/mbedtls-deps', 'to': ['zephyr:packages/mbedtls-sources']},
+        ]),
+    }
+    with app.app_context():
+        project = Project.create('zephyr')
+        variant = Variant.create('demo', project.id)
+        variant_id = variant.id
+        scan = Scan.create('SBOM', variant.id)
+        scan_id = scan.id
+        for name, document in documents.items():
+            path = tmp_path / f'{name}.jsonld'
+            path.write_text(json.dumps(document))
+            SBOMDocument.create(str(path), path.name, scan.id, format='spdx')
+        read_inputs(ControllersCache(), scan.id)
+        assert len(Package.get_all()) == 7
+        module = Package.get_by_string_id(f'mbedtls-deps@{revision}')
+        assert module.version == revision
+        assert 'pkg:github/mbed-tls/mbedtls@v4.1.1' in module.purl
+        assert release_cpe in module.cpe
+        assert Package.get_by_string_id('mbedtls@').version == ''
+        assert Package.get_by_string_id(f'mbedtls-sources@{revision}') is not None
+
+    client = app.test_client()
+    response = client.get(f'/api/package-dependencies?variant_id={variant_id}')
+    assert response.status_code == 200
+    graphs = {document['source_name']: document for document in response.json['documents']}
+    assert {name: len(graph['packages']) for name, graph in graphs.items()} == {
+        'app.jsonld': 1, 'build.jsonld': 3, 'modules-deps.jsonld': 2, 'zephyr.jsonld': 1,
+    }
+    assert graphs['build.jsonld']['edges'] == [
+        {'package_id': 'app@', 'dependency_id': 'mbedtls@'},
+        {'package_id': 'mbedtls@', 'dependency_id': 'tfpsacrypto@'},
+    ]
+    assert graphs['modules-deps.jsonld']['edges'] == [
+        {'package_id': f'zephyr-deps@{revision}', 'dependency_id': f'mbedtls-deps@{revision}'},
+    ]
+    assert graphs['app.jsonld']['edges'] == graphs['zephyr.jsonld']['edges'] == []
+    assert client.get(f'/api/package-dependencies?variant_id={variant_id}&counts=1').json['counts'] == {
+        'app@': {'in': 1, 'out': 0}, 'mbedtls@': {'in': 1, 'out': 1}, 'tfpsacrypto@': {'in': 0, 'out': 1},
+        f'zephyr-deps@{revision}': {'in': 1, 'out': 0}, f'mbedtls-deps@{revision}': {'in': 0, 'out': 1},
+    }
+    with app.app_context():
+        read_inputs(ControllersCache(), scan_id)
+        assert db.session.query(PackageDependency).count() == 3
+
+
+@pytest.mark.parametrize('reverse', [False, True])
+@pytest.mark.parametrize('source_ref', ['zephyr:packages/app', 'app-ref'])
+def test_spdx3_dependencies_resolve_namespaces_and_companion_documents(app, tmp_path, reverse, source_ref):
+    documents = {
+        'app': _zephyr_spdx3([
+            {'type': 'software_Package', 'spdxId': source_ref, 'name': 'app'},
+            {'type': 'LifecycleScopedRelationship', 'scope': 'build', 'relationshipType': 'hasPrerequisite',
+             'from': source_ref, 'to': ['https://example.org/zephyr/packages/lib']},
+            {'type': 'Relationship', 'relationshipType': 'dependsOn', 'from': source_ref,
+             'to': ['zephyr:packages/missing']},
+        ]),
+        'lib': _zephyr_spdx3([
+            {'type': 'software_Package', 'spdxId': 'companion:packages/lib', 'name': 'lib'},
+            {'type': 'Relationship', 'relationshipType': 'dependencyOf',
+             'from': 'companion:packages/lib', 'to': ['companion:packages/app']},
+        ], prefix='companion'),
+    }
+    with app.app_context():
+        project = Project.create('cross-document')
+        variant = Variant.create('demo', project.id)
+        variant_id = variant.id
+        scan = Scan.create('SBOM', variant.id)
+        scan_id = scan.id
+        for name in sorted(documents, reverse=reverse):
+            path = tmp_path / f'{name}.jsonld'
+            path.write_text(json.dumps(documents[name]))
+            SBOMDocument.create(str(path), path.name, scan.id, format='spdx')
+        read_inputs(ControllersCache(), scan.id)
+        rows = db.session.execute(
+            db.select(SBOMDocument.source_name, PackageDependency.package_id, PackageDependency.dependency_id)
+            .join(SBOMDocument, SBOMDocument.id == PackageDependency.sbom_document_id)
+        ).all()
+        names = {package.id: package.name for package in Package.get_all()}
+        assert [(source, names[package], names[dependency]) for source, package, dependency in rows] == [
+            ('app.jsonld', 'app', 'lib'),
+        ]
+
+    client = app.test_client()
+    assert client.get(f'/api/package-dependencies?variant_id={variant_id}&counts=1').json['counts'] == {
+        'app@': {'in': 1, 'out': 0}, 'lib@': {'in': 0, 'out': 1},
+    }
+    graphs = {document['source_name']: document for document in client.get(
+        f'/api/package-dependencies?variant_id={variant_id}'
+    ).json['documents']}
+    assert graphs['app.jsonld']['edges'] == [{'package_id': 'app@', 'dependency_id': 'lib@'}]
+    assert graphs['lib.jsonld']['edges'] == []
+
+    for name, document in documents.items():
+        document['@graph'] = [item for item in document['@graph'] if 'relationshipType' not in item]
+        (tmp_path / f'{name}.jsonld').write_text(json.dumps(document))
+    with app.app_context():
+        read_inputs(ControllersCache(), scan_id)
+        assert db.session.query(PackageDependency).count() == 0
+
+
+def test_spdx3_uri_references_do_not_leak_across_scans_or_namespaces(app, tmp_path):
+    with app.app_context():
+        project = Project.create('isolated')
+        for name, namespace, packages in (
+            ('other-scan', 'https://example.org/zephyr/', ('lib',)),
+            ('current-scan', 'https://example.org/unrelated/', ('lib',)),
+        ):
+            variant = Variant.create(name, project.id)
+            scan = Scan.create('SBOM', variant.id)
+            path = tmp_path / f'{name}.jsonld'
+            path.write_text(json.dumps(_zephyr_spdx3([
+                {'type': 'software_Package', 'spdxId': f'zephyr:packages/{package}',
+                 'name': f'{name}-{package}'} for package in packages
+            ], namespace=namespace)))
+            SBOMDocument.create(str(path), path.name, scan.id, format='spdx')
+        path = tmp_path / 'dependent.jsonld'
+        path.write_text(json.dumps(_zephyr_spdx3([
+            {'type': 'software_Package', 'spdxId': 'zephyr:packages/app', 'name': 'app'},
+            {'type': 'Relationship', 'relationshipType': 'dependsOn',
+             'from': 'zephyr:packages/app', 'to': ['zephyr:packages/lib']},
+        ])))
+        SBOMDocument.create(str(path), path.name, scan.id, format='spdx')
+        read_inputs(ControllersCache())
+        assert db.session.query(PackageDependency).count() == 0
+
+
+@pytest.mark.parametrize('namespace_map', [None, 123, 'invalid'])
+def test_invalid_spdx3_namespace_map_keeps_local_dependencies(app, tmp_path, caplog, namespace_map):
+    document = _spdx3()
+    document['@graph'].append({'type': 'SpdxDocument', 'namespaceMap': namespace_map})
+    variant_id, _ = _scan(app, tmp_path, 'invalid-map', document)
+    graph = app.test_client().get(f'/api/package-dependencies?variant_id={variant_id}').json['documents'][0]
+    assert len(graph['edges']) == 3
+    assert 'Skipping invalid SPDX namespaceMap' in caplog.text
+
+
 def _yocto_spdx2(name, packages=(), refs=(), relationships=()):
     """Build one per-recipe/per-package document of a Yocto SPDX 2.2 archive."""
     return {

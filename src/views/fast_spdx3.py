@@ -95,13 +95,20 @@ class FastSPDX3:
             self.logger.warning("No @graph found in SPDX document")
             return
 
+        include_sources = any(
+            isinstance(item, dict) and item.get('type') == 'SoftwareAgent'
+            and item.get('name') == 'West SPDX Generator'
+            for item in graph
+        )
         for component in graph:
             if not isinstance(component, dict):
                 continue
             if component.get('type') != 'software_Package':
                 continue
             primary_purpose = component.get('software_primaryPurpose', '').lower()
-            if primary_purpose in {'source', 'development', 'documentation'}:
+            if primary_purpose in {'development', 'documentation'} or (
+                primary_purpose == 'source' and not include_sources
+            ):
                 continue
 
             package = self._convert_to_package(component)
@@ -131,10 +138,11 @@ class FastSPDX3:
         name = extract_value(["name", "Name", "packageName", "PackageName"])
         version = extract_value(["versionInfo", "version", "software_packageVersion", "packageVersion"])
 
-        if not name or not version:
+        if not name:
+            self.logger.warning("Skipping SPDX package without a name: %s", pkg_element.get('spdxId'))
             return None
 
-        pkg = Package(name, version, [], [])
+        pkg = Package(name, version or "", [], [])
 
         cpes = self.extract_cpes(pkg_element)
         for cpe in cpes:
@@ -602,11 +610,25 @@ class FastSPDX3:
                 continue
             for target in targets:
                 if isinstance(target, str):
-                    if relation == 'dependsOn':
+                    if relation in {'dependsOn', 'hasPrerequisite'}:
                         edges.add((source, target))
                     elif relation == 'dependencyOf':
                         edges.add((target, source))
-        self.packagesCtrl.add_dependencies(self._document_refs, edges)
+        namespaces: Dict[str, str] = {}
+        for element in graph:
+            if not isinstance(element, dict) or element.get('type') != 'SpdxDocument':
+                continue
+            namespace_map = element.get('namespaceMap', [])
+            if not isinstance(namespace_map, list):
+                self.logger.warning("Skipping invalid SPDX namespaceMap")
+                continue
+            for entry in namespace_map:
+                if (
+                    isinstance(entry, dict) and isinstance(entry.get('prefix'), str)
+                    and isinstance(entry.get('namespace'), str)
+                ):
+                    namespaces[entry['prefix']] = entry['namespace']
+        self.packagesCtrl.add_spdx3_dependencies(self._document_refs, namespaces, edges)
 
     def parse_from_dict(self, spdx: Dict[str, Any]):
         """

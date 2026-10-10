@@ -172,6 +172,30 @@ command exits with an error listing the failed sources.
 
 Path to an SPDX 2 or SPDX 3 SBOM file. SPDX 3 JSON-LD files (`.jsonld`), including Zephyr-generated SBOMs, are supported. Also supports SPDX JSON, tag-value (`.spdx`), and archive formats (`.tar`, `.tar.gz`, `.tar.zst`).
 
+For Zephyr's West SPDX generator, import the companion documents together into the
+same project and variant:
+
+```bash
+./vulnscout --project zephyr_test --variant demo \
+  --add-spdx spdx/app.jsonld \
+  --add-spdx spdx/build.jsonld \
+  --add-spdx spdx/modules-deps.jsonld \
+  --add-spdx spdx/zephyr.jsonld
+```
+
+West may put Git commit hashes in `software_packageVersion`. VulnScout preserves
+these revisions; it does not infer release numbers from them. Some modules also
+provide release versions in external PURLs or CPEs, which are retained separately.
+Packages without a version are imported with an empty (unknown) version, not an
+invented hash or release number. West-generated source packages are included;
+Yocto's source/development/documentation filtering is unchanged.
+
+The dependency graph records package-to-package `dependsOn`, `dependencyOf`, and
+`hasPrerequisite` links, including URI references to companion documents in the
+same scan. `contains`, `hasVariant`, file-level static links, and build input/output
+relationships are not treated as package dependencies. A module manifest dependency
+does not by itself mean that the module was linked into the final firmware.
+
 ---
 
 ### CycloneDX SBOM

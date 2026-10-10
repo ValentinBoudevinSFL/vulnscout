@@ -726,7 +726,7 @@ def test_graph_with_invalid_element_types(spdx3_parser):
 
 
 def test_package_missing_required_fields(spdx3_parser):
-    """Test parsing packages with missing name or version."""
+    """A name is required, but SPDX 3 package versions are optional."""
     spdx_data = {
         "@context": "https://spdx.org/rdf/3.0.1/spdx-context.jsonld",
         "specVersion": "3.0.1",
@@ -755,8 +755,8 @@ def test_package_missing_required_fields(spdx3_parser):
 
     spdx3_parser.parse_from_dict(spdx_data)
 
-    # Only the valid package should be added
-    assert len(spdx3_parser.packagesCtrl) == 1
+    assert len(spdx3_parser.packagesCtrl) == 2
+    assert "test-package@" in spdx3_parser.packagesCtrl
     assert "valid-package@2.0" in spdx3_parser.packagesCtrl
 
 
