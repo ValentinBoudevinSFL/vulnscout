@@ -33,18 +33,18 @@ docker exec vulnscout /scan/src/entrypoint.sh --serve
 
 | Flag | Description |
 |------|-------------|
-| `--project <name>` | Project name for subsequent commands (default: `default`) |
-| `--variant <name>` | Variant name for subsequent commands (default: `default`) |
+| `--project <name>` | Project name for the invocation (default: `default`) |
+| `--variant <name>` | Variant name for the invocation. Imports/scans and custom OpenVEX transfers default to `default`; reports and other exports include all project variants when omitted |
 
 ### Input Commands
 
 | Flag | Description |
 |------|-------------|
-| `--add-spdx <path>` | Add an SPDX 2/3 SBOM file or archive (`.json`, `.spdx`, `.tar`, `.tar.gz`, `.tar.zst`) |
+| `--add-spdx <path>` | Add an SPDX 2/3 JSON SBOM named `*.spdx.json`, or an archive (`.tar`, `.tar.gz`, `.tar.zst`) containing such files. Tag-value `.spdx` files are not loaded by this wrapper |
 | `--add-cve-check <path>` | Add a Yocto CVE check JSON file |
 | `--add-yocto-vex <path>` | Add a Yocto VEX JSON file (from `vex.bbclass`) |
-| `--add-openvex <path>` | Add an OpenVEX JSON file |
-| `--add-cdx <path>` | Add a CycloneDX file |
+| `--add-openvex <path>` | Add an OpenVEX JSON file matching `*openvex*.json` |
+| `--add-cdx <path>` | Add a CycloneDX `.json` file |
 | `--add-grype <path>` | Add a Grype results file (`.grype.json`) |
 | `--perform-scans <types|all>` | Run one or more scanners: `grype`, `nvd`, `osv`, `sbom-cve-check`, or `all`. Separate types with commas or repeat the option. Grype exports the current DB as CycloneDX, runs Grype and merges results; memory is capped by `GRYPE_MEMLIMIT` (default: auto ~80 % of cgroup limit). |
 
@@ -63,6 +63,7 @@ The previous `--perform-grype-scan`, `--perform-nvd-scan`, `--perform-osv-scan`,
 | `--export-cdx` | Export project as CycloneDX 1.6 SBOM to `/scan/outputs/` |
 | `--export-openvex` | Export project as OpenVEX document to `/scan/outputs/` |
 | `--export-custom-vulnscout-data` | Export custom VulnScout JSON data for all project variants, or the selected `--variant`, to `/scan/outputs/` |
+| `--amend` | Update the existing custom VulnScout/OpenVEX output file while preserving stable record ordering; fails if the file does not exist |
 | `--import-custom-vulnscout-data <path>` | Import custom VulnScout JSON data using the variant metadata in the file |
 | `--use-original-timestamps` | With either custom import, preserve file timestamps |
 | `--export-custom-openvex-assessments` | Export custom assessments for the selected `--variant` as an OpenVEX `.json` file |
@@ -70,6 +71,21 @@ The previous `--perform-grype-scan`, `--perform-nvd-scan`, `--perform-osv-scan`,
 | `--use-current-timestamps` | With either custom import, use the current system time |
 | `--match-condition <expr>` | Exit with code 2 if expression matches stored data for any in-scope vulnerability; it does not refresh EPSS. A project without a variant includes all its variants. Incompatible with `--serve` |
 | `--delete-scan <id>` | Delete a past scan by its ID |
+| `--delete-outdated` | Delete outdated package evidence and custom assessments across all projects and variants |
+| `--delete-empty-scans` | Delete later scans with no recorded changes, preserving each variant's initial scan |
+| `--delete-orphaned-vulns` | Delete vulnerabilities with no scan evidence in any project or variant |
+| `--add-asset <path>` | Stage a report image under `/cache/vulnscout/templates/assets/` |
+| `--export-context` | Export the selected project's AI context to `/scan/outputs/context-export.json`, optionally restricted by `--variant` |
+| `--import-context <path>` | Restore AI context using project/variant names in the file; invocation scope does not remap destinations |
+
+Custom VulnScout imports use the current time by default; custom OpenVEX imports
+preserve file timestamps by default. The timestamp flags override these defaults.
+Only the underlying Flask custom-OpenVEX commands require an explicit variant;
+the entrypoint supplies `default` when omitted.
+
+SBOM exports include all project variants unless `--variant` is supplied. Unlike
+reports, an unknown export project currently warns and exports all data; an
+unknown export variant warns and exports its whole project.
 
 ### Data Retrieval Commands
 
@@ -112,19 +128,24 @@ The previous `--perform-grype-scan`, `--perform-nvd-scan`, `--perform-osv-scan`,
 When multiple flags are provided in a single invocation, the entrypoint processes them in this order:
 
 1. **Input staging** — Files specified with `--add-*` are copied into `/scan/inputs/<type>/`
-2. **Scan** — If new inputs, a match condition, or any scanner was requested, the scan pipeline runs:
-   - Database migration (`flask db upgrade`)
+2. **Scan** — If inputs, `--serve`, a match condition, a scanner, or a refresh was requested, the scan pipeline runs:
    - Web server started in background (if `--serve`)
+   - Database migration (`flask db upgrade`)
    - Input files merged into the database
-  - Grype scan (if `grype` or `all` was selected; the legacy `--perform-grype-scan` flag is also supported)
-  - NVD CPE scan (if `nvd` or `all` was selected; the legacy `--perform-nvd-scan` flag is also supported)
-  - OSV PURL scan (if `osv` or `all` was selected; the legacy `--perform-osv-scan` flag is also supported)
-  - sbom-cve-check scan (if `sbom-cve-check` or `all` was selected; the legacy `--perform-sbom-cve-check-scan` flag is also supported)
-  - Vulnerability processing; stored NVD, EPSS, EUVD, and GHSA data is refreshed only when `--refresh-vulnerability-data` is requested
+   - Grype scan (if `grype` or `all` was selected; the legacy `--perform-grype-scan` flag is also supported)
+   - NVD CPE scan (local NVD-FKIE mode by default, if `nvd` or `all` was selected)
+   - OSV PURL scan (if `osv` or `all` was selected)
+   - sbom-cve-check scan (if `sbom-cve-check` or `all` was selected)
+   - Vulnerability processing; stored NVD, EPSS, EUVD, and GHSA data is refreshed only when `--refresh-vulnerability-data` is requested
    - Input files cleaned up after processing
+   - With only a refresh and no inputs/scanners/condition, existing vulnerability data is refreshed directly
 3. **Reports** — Templates specified with `--report` are generated for every variant in the selected project, or only the selected `--variant`
 4. **Exports** — SBOM formats specified with `--export-*` are written
-5. **Custom assessments** — Export/import of review assessments
+5. **Custom data and context** — Export/import of review data and AI context
+
+When `--serve` is used, the scan step waits in the web server's foreground
+process; later reports and exports are not produced until that process exits.
+Use a separate invocation for those commands while the web UI is running.
 
 ---
 

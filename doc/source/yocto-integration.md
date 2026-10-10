@@ -1,7 +1,7 @@
 # Yocto Integration
 
 VulnScout can be integrated into your Yocto/OpenEmbedded build workflow using the
-**meta-vulnscout** BSP layer.
+**meta-vulnscout** integration layer.
 
 ## meta-vulnscout
 

@@ -5,7 +5,8 @@
 ### Requirements
 
 * Docker or Podman (rootless or with your user in the `docker` group)
-* Node.js 22 (via NVM) is required to develop the frontend without issues.
+* Node.js 22.12+ (or a newer supported LTS release) is required by Vite 7.
+  The container frontend build currently uses Node.js 24.
   Installation guide: [nvm](https://github.com/nvm-sh/nvm)
 
 ```bash
@@ -21,8 +22,9 @@ nvm use 22
 | `frontend/` | React + TypeScript frontend (Vite, Tailwind CSS) |
 | `tests/` | Backend unit, integration, end-to-end and webapp tests |
 | `frontend/tests/` | Frontend unit tests (Jest + Testing Library) |
+| `vulnscout_mcp/` | Bundled MCP server and tools for assessments, reviews, and AI context |
 | `src/migrations/` | Alembic database migrations |
-| `.vulnscout/` | Local cache, outputs and example input files |
+| `.vulnscout/` | Host runtime cache/config and generated outputs |
 
 ### Modify the Backend
 
@@ -57,6 +59,10 @@ For this, run the backend in dev mode and run the following:
 docker exec vulnscout \
   flask --app src.bin.webapp db migrate -m "your migration title"
 ```
+
+Review the generated migration and keep a single linear Alembic revision chain.
+`tests/unit_tests/test_migration_graph.py` checks revision IDs and dependencies.
+Apply it with `flask --app src.bin.webapp db upgrade` in the container.
 
 ### Modify the Frontend
 
@@ -166,7 +172,7 @@ pytest --cov=src tests/
 pytest --cov-report html --cov=src tests/
 
 # Type checking
-mypy --config-file tests/tox.ini
+mypy --config-file tox.ini src --check-untyped-defs
 ```
 
 #### Frontend
@@ -201,17 +207,16 @@ The version is then available at runtime:
 ### Testing the Docker Image
 
 You can test the Docker image using the provided `tests` Makefile.
-To build and test the Docker image, run:
+Set `BUILD_TAG` before running any image target:
 
 ```bash
-make -C tests docker_build docker_test docker_clean
+BUILD_TAG=my-local-test make -C tests docker_build docker_test docker_clean
 ```
 
-Optionally set a custom tag:
+The equivalent Podman targets are:
 
 ```bash
-export BUILD_TAG="my-local-test"
-make -C tests docker_build docker_test docker_clean
+BUILD_TAG=my-local-test make -C tests podman_build podman_test podman_clean
 ```
 
 ---
@@ -271,7 +276,7 @@ Full documentation is available in the `doc/` directory as a Sphinx project.
 Install the required Python packages:
 
 ```bash
-pip install sphinx myst-parser sphinx-rtd-theme
+pip install -r doc/requirements.txt
 ```
 
 Then build the HTML documentation:
@@ -300,10 +305,10 @@ VulnScout follows a semantic versioning strategy with development versions betwe
 
 ### Version Numbering Strategy
 
-The versioning workflow follows these steps:
-
-1. **Current stable version**: `v0.9.1` (example - keep for now)
-2. **Before creating a release tag**: Bump version to `v0.10`
-3. **First PR after release**: Bump version to `v0.10-dev`
-4. **Feature PRs**: Continue development with `-dev` suffix
-5. Repeat the cycle
+Use release tags such as `vX.Y` or `vX.Y.Z`, with a `-dev` suffix when marking
+development builds. Do not treat an example version as the current release.
+Keep `Dockerfile`'s build argument, `frontend/package.json`, `README.adoc`, and
+`doc/source/conf.py` in sync; `ci/release_tag.sh <version>` updates those files,
+prompts for a commit and annotated tag, and pushes the tag. The host wrapper's
+default image reference and its documented examples must also be checked,
+because that script does not update them.

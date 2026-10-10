@@ -44,7 +44,9 @@ Then verify the new version is correctly running:
 
 ## Interactive Mode (Web UI)
 
-By default VulnScout runs in **interactive mode**, starting a web dashboard.
+Use `--serve` to start the web dashboard after importing any supplied inputs.
+Running `./vulnscout` without arguments shows help; `start` starts only the
+background container, not the web server.
 
 ```bash
 ./vulnscout --serve \
@@ -70,17 +72,19 @@ The web interface includes a **Settings** tab that provides:
 
 - **Rename Project** — Select a project and give it a new name (must be unique across all projects).
 - **Rename Variant** — Select a variant within a project and rename it (must be unique within the project).
-- **Import SBOM** — Upload an SBOM file directly from the browser instead of using CLI flags.
-  When importing, you must select (or create) the target project and variant.
-  Supported formats are auto-detected or can be specified explicitly: SPDX (2/3), CycloneDX, OpenVEX, Yocto CVE check, and Grype.
-- **Data Maintenance** — In **Scan Settings**, remove outdated data, empty scans, or CVEs no longer included in any project or variant.
+- **Import SBOM** — In **Variants**, select a project and variant, then upload one
+  or more files directly from the browser. Create the project/variant first if needed.
+  Formats are auto-detected: SPDX (2/3), CycloneDX, OpenVEX, Yocto CVE check,
+  Yocto VEX, and Grype. Select no refresh, a complete refresh, or custom
+  vulnerability-data sources after the import.
+- **Data Maintenance** — In **General Settings**, remove outdated data, empty scans, or CVEs no longer included in any project or variant.
   This action is not limited to the project or variant currently selected in the web interface.
 
 ### Removing Outdated Data
 
 VulnScout retains historical package evidence after an SBOM changes so it can identify
 outdated findings and assessments. After the replacement SBOM and scans have been
-reviewed, remove this obsolete data from **Settings → Scan Settings → Data Maintenance**.
+reviewed, remove this obsolete data from **Settings → General Settings → Data Maintenance**.
 
 The confirmation dialog previews every package/variant and custom assessment selected
 for deletion. The cleanup applies to every project and variant in the database.
@@ -110,7 +114,11 @@ findings, assessments, metrics, and refresh metadata.
 
 VulnScout organises data into **projects** and **variants**. A project typically maps to a product, and variants represent different builds or architectures (e.g. `x86_64`, `aarch64`).
 
-Both flags are optional and default to `default` if not provided.
+Both flags are optional. Imports and scanner commands use `default/default`
+when omitted. Reports, SBOM exports, custom VulnScout JSON exports, and context
+exports include every variant of the selected project unless `--variant` is
+provided. Custom OpenVEX transfers operate on one variant, defaulting to
+`default`. Match-condition scope is described below.
 
 ```bash
 ./vulnscout --project <name> --variant <name> <command>
@@ -170,7 +178,10 @@ command exits with an error listing the failed sources.
 --add-spdx <path>
 ```
 
-Path to an SPDX 2 or SPDX 3 SBOM file. Supports JSON, tag-value (`.spdx`), and archive formats (`.tar`, `.tar.gz`, `.tar.zst`).
+Path to an SPDX 2 or SPDX 3 JSON SBOM named `*.spdx.json`, or an archive
+(`.tar`, `.tar.gz`, `.tar.zst`) containing files with that suffix. The underlying
+SPDX parser supports tag-value (`.spdx`) files, but the host/container scan
+wrapper currently does not load them.
 
 ---
 
@@ -211,7 +222,8 @@ patch-file information than the plain cve-check output.
 --add-openvex <path>
 ```
 
-Include vulnerability assessments provided as OpenVEX.
+Include vulnerability assessments provided as OpenVEX. The filename must
+contain `openvex` and end with `.json`, for example `assessments.openvex.json`.
 
 ---
 
@@ -237,9 +249,12 @@ Multiple inputs can be chained in a single command:
 ```
 
 ```{tip}
-The input format is determined by the CLI flag used (`--add-spdx`, `--add-cdx`, etc.), not by the file extension.
-The only exception is SPDX archive inputs (`.tar`, `.tar.gz`, `.tar.zst`), which are automatically extracted and their `.spdx.json` contents imported.
-To ignore parsing errors for malformed SBOMs, set: `IGNORE_PARSING_ERRORS=true`
+The CLI flag selects the input directory, but the scan pipeline also checks
+filenames: SPDX must end with `.spdx.json`, OpenVEX must match `*openvex*.json`,
+Grype must end with `.grype.json`, and the other input types must end with
+`.json`. Non-matching files are not imported. SPDX archives are automatically
+extracted and their `.spdx.json` contents imported.
+To enable the tolerant SPDX parser, use `./vulnscout --config IGNORE_PARSING_ERRORS true`.
 ```
 
 ---
@@ -253,6 +268,18 @@ VulnScout can run Grype on the current database contents:
 ```
 
 `--perform-scans` accepts `grype`, `nvd` (CPE-based), `osv` (PURL-based), and `sbom-cve-check` (local advisory databases). Select several with commas (`--perform-scans nvd,osv`) or by repeating the option, or select every available scanner with `--perform-scans all`. Scans always run in the order Grype, NVD, OSV, sbom-cve-check after inputs are merged. Vulnerability-data refresh is a separate option.
+
+The NVD scanner uses the local NVD-FKIE database by default. To explicitly use
+the NVD REST API, invoke the Flask CLI inside the container:
+
+```bash
+docker exec vulnscout flask --app src.bin.webapp nvd-scan \
+  --project demo --variant x86 --mode api
+```
+
+Use `podman exec` instead when the host wrapper selected Podman. The wrapper
+checks that the running image supports `--perform-scans`; older images must
+be updated or run with `--dev` against this checkout.
 
 The previous `--perform-grype-scan`, `--perform-nvd-scan`, `--perform-osv-scan`, and `--perform-sbom-cve-check-scan` flags remain supported as aliases.
 
@@ -316,7 +343,12 @@ For CI pipelines or automated scans, use the `--match-condition` argument instea
 
 If vulnerabilities match the condition, the script exits with **code 2**, allowing CI systems to fail the pipeline.
 
-Match conditions evaluate vulnerability data already stored by VulnScout. They do not automatically refresh EPSS or other provider data. Add `--refresh-vulnerability-data` to the same command when the condition must use current enrichment data.
+Match conditions evaluate stored vulnerability data and do not automatically
+refresh provider metadata. With inputs or scanners, add
+`--refresh-vulnerability-data` to refresh before matching. For existing data
+only, run the refresh first and the match condition separately: the host
+wrapper's standalone-refresh branch does not forward match conditions or
+report/export options.
 
 When `--project demo` is supplied without `--variant`, the condition is evaluated across all variants in `demo`. Supplying both options limits evaluation to one variant. Omitting both options evaluates `default/default`; supplying only `--variant` selects that variant from the `default` project. Unknown names exit with **code 1**.
 
@@ -380,6 +412,16 @@ Export commands can be chained with inputs and reports in a single invocation:
   --report summary.adoc
 ```
 
+With `--project` but no `--variant`, SBOM exports include every variant in that
+project. Unlike report generation, the underlying SBOM export command currently
+warns and broadens scope when a name is unknown: a missing project exports all
+data, and a missing variant exports the whole project. Verify scope names before
+using exports in automation.
+
+The Flask CLI also supports SPDX 2.3 and CycloneDX 1.4/1.5 using
+`export --format spdx2`, `cdx14`, or `cdx15`; the host flags select SPDX 3.0,
+CycloneDX 1.6, and OpenVEX.
+
 ---
 
 ## Exporting and Importing Custom Assessments
@@ -418,6 +460,8 @@ Current version 2 exports identify targets with variant names and packages,
 not instance-local variant UUIDs. Legacy version 1 files remain importable;
 unsupported future versions are rejected explicitly.
 
+See [VulnScout JSON format](custom-data-format.md) for the interchange schema.
+
 ```bash
 ./vulnscout --project demo --import-custom-vulnscout-data /path/to/custom_vulnscout_data_all.json
 
@@ -426,7 +470,9 @@ unsupported future versions are rejected explicitly.
 
 ### OpenVEX
 
-OpenVEX custom-assessment transfers operate on one JSON document and require `--variant` for both import and export.
+OpenVEX custom-assessment transfers operate on one JSON document and one
+variant. The host and container wrappers use `default` when `--variant` is
+omitted; the underlying Flask custom-OpenVEX commands require it explicitly.
 
 ```bash
 # Export a variant
@@ -443,6 +489,34 @@ OpenVEX imports preserve statement timestamps by default. Add
 `--use-current-timestamps` to use the current system time, or use
 `--use-original-timestamps` to select the default explicitly.
 
+### Updating an Existing Review Export
+
+Add `--amend` to either custom export command to update the existing output file
+in `.vulnscout/outputs/`. Unchanged records keep their order, changed records are
+replaced, and new records are appended, reducing Git diffs. Data outside the
+selected variants is removed. The output file must already exist.
+
+```bash
+./vulnscout --project demo --export-custom-vulnscout-data --amend
+./vulnscout --project demo --variant x86 --export-custom-openvex-assessments --amend
+```
+
+### AI Assessment Context
+
+Context transfers are separate from assessment transfers:
+
+```bash
+./vulnscout --project demo --export-context
+./vulnscout --project demo --variant x86 --export-context
+./vulnscout --import-context /path/to/context-export.json
+```
+
+Exports write `context-export.json` to the outputs directory and include all
+project variants unless one is selected. Import uses the project and variant
+names recorded in the file, not the wrapper's scope flags; it overwrites matching
+context and reports missing destinations or invalid entries. See
+[AI Assessments](ai-assessments.md) for context fields and the import format.
+
 ---
 
 ## Configuration
@@ -455,7 +529,7 @@ Persistent configuration is stored in `.vulnscout/cache/config.env` and is autom
 # Set a config value
 ./vulnscout config <key> <value>
 
-# List current configuration (sensitive values masked)
+# List current configuration (prints the host config file verbatim)
 ./vulnscout config-list
 
 # Remove a config key
@@ -468,9 +542,17 @@ Example — set an NVD API key for higher rate limits:
 ./vulnscout config NVD_API_KEY abc123
 ```
 
+Host `config-list` does not mask secrets; do not share its output. The container
+entrypoint's `--config-list` masks keys ending in `API_KEY`, `PASSWORD`, or
+`SECRET`, but is not a general-purpose secret scrubber.
+
 ### Environment Variables
 
-The following environment variables can be set via `vulnscout config` or exported before running.
+Use `vulnscout config` for persistent container settings. Host environment
+variables configure the wrapper's `VULNSCOUT_*` paths and image; it also forwards
+`GRYPE_MEMLIMIT` and `SBOM_CVE_CHECK_AUTO_UPDATE` when starting a container.
+Arbitrary exported host variables are not automatically passed through. Stored
+configuration is sourced on each run and can override host values.
 
 Example:
 
@@ -487,12 +569,12 @@ Example:
 | `VULNSCOUT_BUILD_DIR` | Root build directory on the host | `./.vulnscout` |
 | `VULNSCOUT_OUTPUTS_DIR` | Directory for output files on the host | `$VULNSCOUT_BUILD_DIR/outputs` |
 | `VULNSCOUT_CACHE_DIR` | Cache directory (SQLite database and config) | `$VULNSCOUT_BUILD_DIR/cache` |
-| `FLASK_RUN_PORT` | Port the web UI listens on | `7275` |
+| `FLASK_RUN_PORT` | Port inside the container; the host wrapper publishes the fixed mapping `7275:7275` | `7275` |
 | `FLASK_RUN_HOST` | Host address for the web UI | `0.0.0.0` |
 | `VITE_API_URL` | Optional backend API URL for the dev frontend (empty uses Vite's same-origin `/api` proxy) | empty |
 | `USER_UID` | UID used to write output files | current user |
 | `USER_GID` | GID used to write output files | current group |
-| `REFRESH_REMOTE_DELAY` | How often EPSS/NVD data is re-fetched (`never`, `always`, `48h`, `7d`, etc.) | `48h` |
+| `REFRESH_REMOTE_DELAY` | Provider refresh interval (`never`, `always`, `48h`, `7d`, `2w`, etc.) | `2w` in a generated host config; `48h` in the container without that setting |
 
 #### Scan & Enrichment
 
@@ -501,6 +583,13 @@ Example:
 | `NVD_API_KEY` | NVD API key for higher rate limits | _(none)_ |
 | `IGNORE_PARSING_ERRORS` | Continue scanning even if input files contain errors | `false` |
 | `VERBOSE_MODE` | Enable verbose logging in the container | `false` |
+| `GRYPE_MEMLIMIT` | Go soft memory limit for Grype (`4GiB`, bytes, or `off`) | auto, about 80% of available memory |
+| `SBOM_CVE_CHECK_AUTO_UPDATE` | Clone/update local advisory databases before use; `0` allows offline use of existing clones | `1` |
+| `VULNSCOUT_SBOM_CVE_CHECK_DB_DIR` | Optional host advisory directory mounted at `/local_databases` | unset; uses `$VULNSCOUT_CACHE_DIR/local_databases` |
+
+`SBOM_CVE_CHECK_DATABASES_DIR` is the corresponding **container** path, normally
+`/cache/vulnscout/local_databases`. When configuring a shared host clone, set
+`VULNSCOUT_SBOM_CVE_CHECK_DB_DIR` and restart the container to apply the mount.
 
 #### Report Metadata
 
@@ -525,9 +614,6 @@ VulnScout supports HTTP proxies. Set them via the config command:
 ./vulnscout config NO_PROXY localhost,127.0.0.1
 ```
 
-Or set them as environment variables in the shell before running `vulnscout`:
-
-```bash
-export HTTP_PROXY=http://proxy.example.com:8080
-./vulnscout --serve
-```
+For the host wrapper, store proxy settings in its config file before starting
+the container. When managing a container directly, pass them using the
+container engine's `-e` options.

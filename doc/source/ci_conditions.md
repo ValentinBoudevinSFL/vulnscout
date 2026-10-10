@@ -12,7 +12,17 @@ Evaluate and enforce conditions on vulnerabilities within a project.
 
 The `vulnscout` command can optionally accept a `--match-condition CONDITION` argument that causes the command to exit with code **2** if the specified condition is met by any vulnerability in scope.
 
-The condition uses vulnerability data already stored by VulnScout. It does not automatically refresh EPSS or other provider data. Add `--refresh-vulnerability-data` to the same command when the condition must use current enrichment data.
+The condition uses vulnerability data already stored by VulnScout. It does not
+automatically refresh EPSS or other provider data. When importing files or
+running scanners, add `--refresh-vulnerability-data` to that invocation to
+refresh before matching. With existing data only, the host wrapper currently
+handles a standalone refresh separately: refresh first, then evaluate the
+condition in a second invocation.
+
+```bash
+./vulnscout --project demo --refresh-vulnerability-data
+./vulnscout --project demo --match-condition "epss >= 30% and affected"
+```
 
 The scope is selected as follows:
 
@@ -29,7 +39,7 @@ Match conditions can be combined with input files in a single invocation:
 ./vulnscout --project demo \
   --add-spdx /path/to/sbom.spdx.json \
   --add-cve-check /path/to/cve-check.json \
-    --match-condition "((cvss >= 9.0 or (cvss >= 7.0 and epss >= 30%)) and (pending or affected))"
+  --match-condition "((cvss >= 9.0 or (cvss >= 7.0 and epss >= 30%)) and (pending or affected))"
 ```
 
 If the `CONDITION` is invalid, the configuration is not found, or an error occurs during the process, the command returns an exit code of **1**. This allows users to differentiate between a configuration error and a condition match.
@@ -56,12 +66,10 @@ This example evaluates every variant in `demo` and exits with code **2** if any 
 
 The full language definition can be found in `src/controllers/conditions_parser.py`.
 
-A condition is always expressed as either:
-- `<left condition> <operator> <right condition>` where `<operator>` is :
-  - `and`, `or`, `not`
-  - `>`, `>=`, `<`, `<=`, `==`, `!=`
-- `( <condition> )`: can be used to group expressions
-- `<boolean expression>`: as an alias to `<token> == {true|false}`
+A condition combines comparisons (`>`, `>=`, `<`, `<=`, `==`, `!=`) with
+the binary operators `and` and `or`, the unary operator `not`, and parentheses
+for grouping. A boolean token can be used directly, such as `pending`, or
+compared to `true`/`false`.
 
 Tokens can be:
 - `true`, `false`: mapped to the corresponding boolean values

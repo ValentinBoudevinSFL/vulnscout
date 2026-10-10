@@ -22,7 +22,7 @@ cd vulnscout
 Start VulnScout and import the provided example data:
 
 ```bash
-./vulnscout start \
+./vulnscout --serve \
   --add-spdx $(pwd)/example/spdx3/core-image-minimal-qemux86-64.rootfs.spdx.json \
   --add-cve-check $(pwd)/example/spdx3/core-image-minimal-qemux86-64.rootfs.json
 ```
