@@ -126,6 +126,17 @@ When multiple flags are provided in a single invocation, the entrypoint processe
 4. **Exports** — SBOM formats specified with `--export-*` are written
 5. **Custom assessments** — Export/import of review assessments
 
+Migration or input-registration failures stop the pipeline before vulnerability
+processing; a failed registration never falls back to processing the previous
+scan. Processing failures retain the staged inputs and skip reports/exports.
+Exit code `2` still means a successfully processed scan triggered a match condition.
+
+SQLite permits only one writer at a time, even in WAL mode. Run imports
+sequentially against a shared database and wait for ongoing imports or background
+writers to finish before retrying a `database is locked` error. Do not delete
+the database or its WAL files to clear a lock. Dependency graphs are replaced
+atomically, so repeated graph writes do not depend on a stale existence check.
+
 ---
 
 ## Internal Paths

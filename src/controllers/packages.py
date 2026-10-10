@@ -3,8 +3,6 @@
 
 import uuid
 
-from sqlalchemy import tuple_
-
 from ..models import Package, Finding, SBOMDocument, SBOMPackage, PackageDependency
 from ..helpers.verbose import verbose
 from ..helpers.spdx_sources import SPDXSources, SourceKey
@@ -139,23 +137,9 @@ class PackagesController:
                 target_id = self.get_or_resolve_db_id(references[target])
                 if source_id != target_id and source_id in package_ids and target_id in package_ids:
                     pairs.add((source_id, target_id))
-        existing = {tuple(row) for row in db.session.execute(
-            db.select(PackageDependency.package_id, PackageDependency.dependency_id)
-            .where(PackageDependency.sbom_document_id == document.id)
-        )}
-        stale = existing - pairs
-        added = pairs - existing
-        if stale:
-            db.session.execute(db.delete(PackageDependency).where(
-                PackageDependency.sbom_document_id == document.id,
-                tuple_(PackageDependency.package_id, PackageDependency.dependency_id).in_(stale),
-            ))
-        db.session.add_all(
-            PackageDependency(sbom_document_id=document.id, package_id=source, dependency_id=target)
-            for source, target in added
+        PackageDependency.replace_for_documents(
+            {document.id}, {(document.id, source, target) for source, target in pairs},
         )
-        if stale or added:
-            db.session.commit()
 
     def add_spdx_dependencies(self, namespace: str | None, references: dict[str, str],
                               external_documents: dict[str, str], edges: set[tuple[str, str]]) -> None:
@@ -180,7 +164,6 @@ class PackagesController:
     def add_spdx3_dependencies(self, references: dict[str, str], namespaces: dict[str, str],
                                edges: set[tuple[str, str]]) -> None:
         """Queue SPDX 3 URI references for resolution across documents of the same scan."""
-        self.add_dependencies(references, edges)
         document = self._current_sbom_document
         if document is None:
             return
@@ -215,24 +198,7 @@ class PackagesController:
             target_id = self.get_or_resolve_db_id(target)
             if source_id is not None and target_id is not None and source_id != target_id:
                 rows.add((document_id, source_id, target_id))
-        existing = {tuple(row) for row in db.session.execute(
-            db.select(PackageDependency.sbom_document_id, PackageDependency.package_id,
-                      PackageDependency.dependency_id)
-            .join(SBOMDocument, SBOMDocument.id == PackageDependency.sbom_document_id)
-            .where(SBOMDocument.scan_id.in_(set(documents.values())))
-        ) if row[0] in documents}
-        stale = sorted(existing - rows)
-        added = rows - existing
-        for start in range(0, len(stale), 500):
-            db.session.execute(db.delete(PackageDependency).where(tuple_(
-                PackageDependency.sbom_document_id, PackageDependency.package_id, PackageDependency.dependency_id,
-            ).in_(stale[start:start + 500])))
-        db.session.add_all(
-            PackageDependency(sbom_document_id=document_id, package_id=source, dependency_id=target)
-            for document_id, source, target in added
-        )
-        if stale or added:
-            db.session.commit()
+        PackageDependency.replace_for_documents(set(documents), rows)
 
     def add_spdx_sources(self, namespace: str | None, references: dict[str, str],
                          external_documents: dict[str, str], urls: dict[str, str],

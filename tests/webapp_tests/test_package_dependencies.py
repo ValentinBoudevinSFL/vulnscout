@@ -4,7 +4,7 @@ import json
 import os
 
 import pytest
-from sqlalchemy import inspect, text
+from sqlalchemy import event, inspect, text
 
 from src.bin.webapp import create_app
 from src.bin.cmd_process import read_inputs
@@ -54,6 +54,59 @@ def _spdx3():
         {'type': 'Relationship', 'relationshipType': 'describes',
          'from': 'pkg:app', 'to': ['pkg:util']},
     ]}
+
+
+@pytest.mark.parametrize('queued', [False, True])
+def test_dependency_replacement_ignores_raced_existence_check_and_preserves_other_documents(app, queued):
+    from src.extensions import batch_session
+
+    project = Project.create('replace-dependencies')
+    variant = Variant.create('default', project.id)
+    scan = Scan.create('SBOM', variant.id)
+    document = SBOMDocument.create('one.json', 'one', scan.id)
+    other_document = SBOMDocument.create('two.json', 'two', scan.id)
+    ctrl = ControllersCache().packages
+    ctrl.current_sbom_document = document
+    source = ctrl.add(Package('app', '1'))
+    dependency = ctrl.add(Package('lib', '1'))
+    package_id, dependency_id = source.id, dependency.id
+    document_id, other_document_id = document.id, other_document.id
+    SBOMPackage.create(other_document.id, source.id)
+    db.session.add(PackageDependency(
+        sbom_document_id=other_document.id, package_id=source.id, dependency_id=dependency.id,
+    ))
+    db.session.commit()
+    refs = {'pkg:app': source.string_id, 'pkg:lib': dependency.string_id}
+    raced = False
+
+    def insert_raced_edge(connection, cursor, statement, parameters, context, executemany):
+        nonlocal raced
+        if not raced and 'package_dependencies' in statement and statement.startswith(('DELETE', 'INSERT')):
+            raced = True
+            cursor.execute(
+                'INSERT INTO package_dependencies (sbom_document_id, package_id, dependency_id) VALUES (?, ?, ?)',
+                (document_id.hex, package_id.hex, dependency_id.hex),
+            )
+
+    engine = db.engine
+    event.listen(engine, 'before_cursor_execute', insert_raced_edge)
+    try:
+        with batch_session():
+            if queued:
+                ctrl.add_spdx3_dependencies(refs, {}, {('pkg:app', 'pkg:lib')})
+                ctrl.flush_spdx_dependencies()
+            else:
+                ctrl.add_dependencies(refs, {('pkg:app', 'pkg:lib')})
+    finally:
+        event.remove(engine, 'before_cursor_execute', insert_raced_edge)
+    assert raced
+    assert set(db.session.execute(db.select(
+        PackageDependency.sbom_document_id, PackageDependency.package_id, PackageDependency.dependency_id,
+    ))) == {(document_id, package_id, dependency_id), (other_document_id, package_id, dependency_id)}
+    ctrl.add_dependencies(refs, set())
+    assert [row.sbom_document_id for row in db.session.query(PackageDependency).all()] == [other_document_id]
+    PackageDependency.replace_for_documents(set(), set())
+    assert db.session.query(PackageDependency).count() == 1
 
 
 def _zephyr_spdx3(elements, namespace='https://example.org/zephyr/', prefix='zephyr'):
