@@ -145,6 +145,17 @@ def test_zephyr_companion_documents_preserve_versions_and_build_dependencies(app
     assert graphs['modules-deps.jsonld']['edges'] == [
         {'package_id': f'zephyr-deps@{revision}', 'dependency_id': f'mbedtls-deps@{revision}'},
     ]
+    module_graph = next(package for package in graphs['modules-deps.jsonld']['packages']
+                        if package['name'] == 'mbedtls-deps')
+    assert module_graph['version'] == module_graph['source_revision'] == revision
+    assert module_graph['release_version'] == '4.1.1'
+    package_response = client.get(f'/api/packages?variant_id={variant_id}&format=list')
+    assert package_response.status_code == 200
+    module_api = next(package for package in package_response.json if package['name'] == 'mbedtls-deps')
+    assert module_api['release_version'] == '4.1.1'
+    assert module_api['source_revision'] == revision
+    assert module_api['id'] == f'mbedtls-deps@{revision}'
+    assert {item['source'] for item in module_api['version_evidence']} == {'sbom', 'purl', 'cpe'}
     assert graphs['app.jsonld']['edges'] == graphs['zephyr.jsonld']['edges'] == []
     assert client.get(f'/api/package-dependencies?variant_id={variant_id}&counts=1').json['counts'] == {
         'app@': {'in': 1, 'out': 0}, 'mbedtls@': {'in': 1, 'out': 1}, 'tfpsacrypto@': {'in': 0, 'out': 1},

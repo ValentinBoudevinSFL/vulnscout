@@ -186,6 +186,8 @@ same project and variant:
 West may put Git commit hashes in `software_packageVersion`. VulnScout preserves
 these revisions; it does not infer release numbers from them. Some modules also
 provide release versions in external PURLs or CPEs, which are retained separately.
+The SBOM table displays these as separate **Release version** and **Source revision**
+columns, with provenance and conflicting identifiers available on hover.
 Packages without a version are imported with an empty (unknown) version, not an
 invented hash or release number. West-generated source packages are included;
 Yocto's source/development/documentation filtering is unchanged.

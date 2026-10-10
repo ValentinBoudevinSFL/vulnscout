@@ -5,12 +5,64 @@
 
 import pytest
 from src.views.fast_spdx3 import FastSPDX3
+from src.views.spdx3 import SPDX3
 from src.controllers import ControllersCache
 
 
 @pytest.fixture
 def spdx3_parser():
     return FastSPDX3(ControllersCache())
+
+
+def test_commit_version_preserves_all_release_identifiers(spdx3_parser):
+    revision = "a" * 40
+    spdx3_parser.parse_from_dict({"@graph": [{
+        "type": "software_Package", "spdxId": "pkg:mbedtls", "name": "mbedtls",
+        "software_packageVersion": revision,
+        "externalIdentifier": [
+            {"externalIdentifierType": "packageUrl", "identifier": f"pkg:github/org/lib@{revision}"},
+            {"externalIdentifierType": "packageUrl", "identifier": "pkg:github/Mbed-TLS/mbedtls@v4.1.1"},
+            {"externalIdentifierType": "cpe23Type",
+             "identifier": "cpe:2.3:a:trustedfirmware:mbed_tls:4.1.1:*:*:*:*:*:*:*"},
+        ],
+    }]})
+    package = spdx3_parser.packagesCtrl.get(f"mbedtls@{revision}")
+    assert package.version == revision
+    assert package.version_info["release_version"] == "4.1.1"
+    assert package.version_info["source_revision"] == revision
+    assert len(package.purl) == 3
+    assert {item["source"] for item in package.version_info["version_evidence"]} == {"sbom", "purl", "cpe"}
+    exported = SPDX3(ControllersCache()).generate_package_element(package)
+    assert exported["software_packageVersion"] == revision
+    assert any(identifier["identifier"] == "pkg:github/mbed-tls/mbedtls@v4.1.1"
+               for identifier in exported["externalIdentifier"])
+
+
+def test_spdx3_purl_conflicts_remain_visible(spdx3_parser):
+    spdx3_parser.parse_from_dict({"@graph": [{
+        "type": "software_Package", "spdxId": "pkg:lib", "name": "lib",
+        "software_packageVersion": "a" * 40, "packageUrl": "pkg:generic/lib@1.0",
+        "externalIdentifier": [{"externalIdentifierType": "purl", "identifier": "pkg:generic/lib@2.0"}],
+    }]})
+    package = spdx3_parser.packagesCtrl.get(f"lib@{'a' * 40}")
+    assert package.version_info["release_version"] is None
+    assert package.version_info["version_conflict"]
+
+
+def test_spdx3_collects_valid_purls_from_all_supported_fields(spdx3_parser):
+    first = "pkg:generic/lib@1.0"
+    second = "pkg:github/org/lib@v1.0"
+    element = {
+        "packageUrl": first, "software_packageUrl": second,
+        "externalIdentifier": [
+            None, {"externalIdentifierType": "purl", "identifier": first},
+            {"externalIdentifierType": "packageUrl", "identifier": 123},
+            {"externalIdentifierType": "packageUrl", "identifier": ""},
+        ],
+    }
+    assert spdx3_parser.extract_purls(element) == [first, second]
+    assert spdx3_parser.extract_purl(element) == first
+    assert spdx3_parser.extract_purls({"packageUrl": 123}) == []
 
 
 def test_parse_empty_json(spdx3_parser):

@@ -8,6 +8,7 @@ import '@xyflow/react/dist/style.css';
 import ModalShell from './ModalShell';
 import { listDependencies } from '../handlers/dependencies';
 import type { DependencyDocument, DependencyPackage } from '../handlers/dependencies';
+import { packageVersionLabel, versionEvidenceTitle } from '../helpers/packageVersions';
 
 type Props = {
     variantId?: string;
@@ -117,8 +118,9 @@ function DependencyTree({ packageId, packages, links, onSelectPackage, ancestors
                 <FontAwesomeIcon icon={expanded ? faChevronDown : faChevronRight} />
             </button> : <span className="w-6 shrink-0" />}
             <button type="button" onClick={() => onSelectPackage(packageId)}
+                title={pkg ? versionEvidenceTitle(pkg) : packageId}
                 className="min-w-0 break-all text-left text-cyan-300 hover:underline">
-                {pkg ? `${pkg.name}@${pkg.version}` : packageId}
+                {pkg ? packageVersionLabel(pkg) : packageId}
             </button>
             {children.length > 0 && <span className="ml-auto tabular-nums text-neutral-400">{children.length}</span>}
         </div>
@@ -217,7 +219,7 @@ export function DependencyModalView({ documents, packageId, onSelectPackage, loa
             const position = positions.get(id)!;
             const linked = variants.filter(variant => !hiddenVariants.has(variant.id)
                 && (dependencyVariants.get(id)?.has(variant.id) || dependentVariants.get(id)?.has(variant.id)));
-            const label = `${pkg.name}@${pkg.version}`;
+            const label = packageVersionLabel(pkg);
             return { id,
                 data: { label: id === packageId ? label
                     : <span title={`Variants: ${linked.map(variant => variant.name).join(', ')}`}>{label}</span> },

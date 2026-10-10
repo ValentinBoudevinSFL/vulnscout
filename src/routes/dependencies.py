@@ -146,7 +146,7 @@ def init_app(app: Flask) -> None:
                 .join(SBOMDocument, SBOMDocument.id == SBOMPackage.sbom_document_id)
                 .join(Package, Package.id == SBOMPackage.package_id)
                 .where(SBOMDocument.scan_id.in_(scan_ids))
-                .options(load_only(Package.name, Package.version, Package.supplier))
+                .options(load_only(Package.name, Package.version, Package.supplier, Package.cpe, Package.purl))
             )
         ]
         if allowed_ids is not None:
@@ -173,6 +173,7 @@ def init_app(app: Flask) -> None:
         for document_id, package in rows:
             result[document_id]['packages'].append({
                 'id': package.string_id, 'name': package.name, 'version': package.version,
+                **package.version_info,
             })
         for document_id, package_id, dependency_id in edges:
             if package_id in members[document_id] and dependency_id in scan_packages[scan_of[document_id]]:

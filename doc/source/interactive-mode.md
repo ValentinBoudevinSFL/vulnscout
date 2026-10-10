@@ -63,7 +63,7 @@ The SBOM table lists every package present in the imported SBOMs within your cur
 
 ### Search
 
-The search bar accepts free-text queries that match against package name, version, CPE, and PURL identifiers. Typing at least two characters triggers a fuzzy search powered by Fuse.js. The search supports the same expression language as the vulnerability table:
+The search bar accepts free-text queries that match against package name, reported version, release version, full source revision, CPE, and PURL identifiers. Typing at least two characters triggers a fuzzy search powered by Fuse.js. The search supports the same expression language as the vulnerability table:
 
 - **`term`** — rows containing the term are shown.
 - **`term1 term2`** — AND semantics: both terms must match.
@@ -74,11 +74,36 @@ A small **info icon** next to the search bar opens a quick-reference panel for t
 
 ### Column Visibility
 
-The **Columns** dropdown lets you toggle which columns are displayed. The default set includes Name, Version, Dependency, Vulnerabilities, Variants, and Sources. The **Dependency** column shows each package's incoming and outgoing dependency counts and opens the [dependency graph](#dependency-graph); sort it to list the packages with the highest **In** + **Out** total first, or hide it to skip loading the counts. Additional columns available are:
+The **Columns** dropdown lets you toggle which columns are displayed. The default set includes Name, Release version, Source revision, Dependency, Vulnerabilities, Variants, and Sources. The **Dependency** column shows each package's incoming and outgoing dependency counts and opens the [dependency graph](#dependency-graph); sort it to list the packages with the highest **In** + **Out** total first, or hide it to skip loading the counts. Additional columns available are:
 
 - **CPE** — Common Platform Enumeration identifiers for the package. These are used by the NVD scanner to match vulnerabilities.
 - **PURL** — Package URL identifiers. These are used by the OSV scanner for more precise ecosystem-level matching.
 - **Remaining Pending Vulnerabilities** — the count of vulnerabilities still awaiting triage for this package.
+
+**Release version** uses the reported non-hash version and explicit PURL/CPE
+versions. **Source revision** recognizes full 40- or 64-character hexadecimal
+revisions and displays the first 12 characters as plain text, with the full value on hover.
+Hover either value to see the original SBOM/PURL/CPE evidence. Missing releases
+are shown as **Unknown**; conflicting values are shown as **Conflicting metadata**,
+not silently selected. Numeric `v` tag prefixes are normalized (for example,
+`v4.1.1` and `4.1.1` agree), and CPE values are compared case-insensitively.
+Other tag aliases are not inferred.
+CPE wildcard patterns are not treated as exact release versions.
+
+**Conflicting metadata** means that the supplied identifiers contain different
+release labels that the importer cannot safely equate. For example, Zephyr's
+hostap PURL reports `hostap_2_11` while its CPE reports `2.11`; Trusted Firmware-M
+reports `TF-Mv2.3.1` in its PURL and `2.3.1` in its CPE. These may be tag aliases
+for the same release, not evidence of different installed releases, but the
+importer does not guess project-specific naming rules. Hover the warning to
+inspect the original values. A release label and a commit hash are not a conflict:
+they describe separate fields. The Source revision column warns only when
+multiple distinct full revisions are supplied.
+
+These are display fields: the original reported version remains part of the
+package identity, comparisons, assessments, and SBOM exports. Different source
+commits advertising the same release remain distinct packages. Existing database
+rows gain the display metadata without reimporting; no schema migration is needed.
 
 ### Filters
 

@@ -149,14 +149,18 @@ class FastSPDX3:
             pkg.add_cpe(cpe)
         pkg.generate_generic_cpe()
 
-        purl = self.extract_purl(pkg_element)
-        if purl:
+        for purl in self.extract_purls(pkg_element):
             pkg.add_purl(purl)
         pkg.generate_generic_purl()
 
         return pkg
 
     def extract_purl(self, element: Dict[str, Any]) -> Optional[str]:
+        """Return the first PURL for callers expecting a single identifier."""
+        purls = self.extract_purls(element)
+        return purls[0] if purls else None
+
+    def extract_purls(self, element: Dict[str, Any]) -> List[str]:
         """
         Extract Package URL (PURL) from SPDX element.
 
@@ -164,11 +168,11 @@ class FastSPDX3:
         some producers (including Zephyr's SBOM generator) use instead of the
         legacy top-level properties.
         """
-        if 'packageUrl' in element:
-            return element['packageUrl']
-
-        if 'software_packageUrl' in element:
-            return element['software_packageUrl']
+        purls = []
+        for field in ('packageUrl', 'software_packageUrl'):
+            value = element.get(field)
+            if isinstance(value, str) and value and value not in purls:
+                purls.append(value)
 
         external_identifiers = element.get('externalIdentifier')
         if isinstance(external_identifiers, list):
@@ -177,9 +181,9 @@ class FastSPDX3:
                     continue
                 if ext_id.get('externalIdentifierType') in {'packageUrl', 'purl'}:
                     identifier = ext_id.get('identifier')
-                    if isinstance(identifier, str) and identifier:
-                        return identifier
-        return None
+                    if isinstance(identifier, str) and identifier and identifier not in purls:
+                        purls.append(identifier)
+        return purls
 
     def extract_cpes(self, element: Dict[str, Any]) -> List[str]:
         """
@@ -195,9 +199,9 @@ class FastSPDX3:
             if not isinstance(ext_id, dict):
                 continue
             ext_id_type = ext_id.get('externalIdentifierType', '')
-            if ext_id_type == 'cpe23' or ext_id_type == 'cpe22':
+            if ext_id_type in {'cpe23', 'cpe22', 'cpe23Type', 'cpe22Type'}:
                 cpe_id = ext_id.get('identifier')
-                if cpe_id:
+                if isinstance(cpe_id, str) and cpe_id:
                     cpe_identifiers.append(cpe_id)
 
         return cpe_identifiers

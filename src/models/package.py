@@ -13,6 +13,7 @@ from sqlalchemy.orm import Mapped, relationship, mapped_column
 from packageurl import PackageURL
 
 from ..extensions import db, Base
+from ..helpers.package_versions import PackageVersionInfo, package_version_info
 
 
 if typing.TYPE_CHECKING:
@@ -265,6 +266,10 @@ class Package(Base):
     # Serialisation
     # ------------------------------------------------------------------
 
+    @property
+    def version_info(self) -> PackageVersionInfo:
+        return package_version_info(self.version, list(self.purl or []), list(self.cpe or []))
+
     def to_dict(self) -> dict:
         return {
             "id": self.string_id,
@@ -275,6 +280,7 @@ class Package(Base):
             "purl": list(self.purl or []),
             "licences": self.licences or "",
             "supplier": self.supplier,
+            **self.version_info,
         }
 
     @staticmethod

@@ -35,6 +35,23 @@ const documents: DependencyDocument[] = [
     },
 ];
 
+test('shows release/revision metadata while navigation keeps commit-based package identity', async () => {
+    const revision = 'a'.repeat(40);
+    const id = `lib@${revision}`;
+    const selectPackage = jest.fn();
+    const metadataDocuments: DependencyDocument[] = [{...documents[0], packages: [
+        {id: 'app', name: 'app', version: '1.0'},
+        {id, name: 'lib', version: revision, release_version: '4.1.1', source_revision: revision,
+            version_evidence: [{source: 'purl', version: 'v4.1.1', identifier: 'pkg:generic/lib@v4.1.1'}]},
+    ], edges: [{package_id: 'app', dependency_id: id}]}];
+    render(<DependencyModalView documents={metadataDocuments} packageId="app" onSelectPackage={selectPackage} />);
+    const tree = within(screen.getByRole('tree', {name: 'Depends on'}));
+    const button = tree.getByRole('button', {name: 'lib@4.1.1 (aaaaaaaaaaaa)'});
+    expect(button.title).toContain('pkg:generic/lib@v4.1.1');
+    await userEvent.setup().click(button);
+    expect(selectPackage).toHaveBeenCalledWith(id);
+});
+
 test('shows both directions and follows the selected SBOM source', async () => {
     const selectPackage = jest.fn();
     render(<DependencyModalView documents={documents} packageId="app" onSelectPackage={selectPackage} />);
