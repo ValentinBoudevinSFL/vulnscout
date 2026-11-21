@@ -568,6 +568,36 @@ def test_review_retry_waits_for_failed_attempt_cleanup(env, monkeypatch):
     assert env.q.run_once("action") == request_id
 
 
+@pytest.mark.parametrize(("first_kind", "next_kind"), [
+    ("assess", "review"), ("review", "assess"), ("review", "review"), ("review", "message"),
+])
+def test_conflicting_turn_waits_for_session_cleanup(env, monkeypatch, first_kind, next_kind):
+    review = {"kind": "review", "assessment_id": _custom(env, [("arm", "openssl")])}
+    first = _assess() if first_kind == "assess" else review
+    [active], _ = env.q.enqueue("per-action", "web", [first], model="m")
+    if next_kind == "message":
+        [waiting], _ = env.q.enqueue(active["conversation_id"], "web", [_message()], model="m")
+        lane = "chat"
+    else:
+        second = _assess() if next_kind == "assess" else {**review, "key": "another-review"}
+        [waiting], _ = env.q.enqueue("per-action", "web", [second], model="m")
+        assert active["conversation_id"] != waiting["conversation_id"]
+        lane = "action"
+    env.fake.script[first_kind].append(raising(RuntimeError("failed turn")))
+    attempted = []
+
+    def schedule_during_cleanup(sessions):
+        if sessions:
+            attempted.append(env.q.run_once(lane))
+        return False
+
+    with monkeypatch.context() as patch:
+        patch.setattr(env.q, "_delete_sessions", schedule_during_cleanup)
+        assert env.q.run_once("action") == active["id"]
+    assert attempted == [None]
+    assert env.q.run_once(lane) == waiting["id"]
+
+
 def test_stop_cancels_a_running_turn_and_keeps_its_writes(env):
     from src.models.assessment import Assessment
 

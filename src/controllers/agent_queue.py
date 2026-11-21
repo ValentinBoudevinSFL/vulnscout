@@ -192,7 +192,7 @@ class AgentConversationState:
 
 @dataclass
 class _Running:
-    request_id: str
+    request: AgentRequest
     loop: asyncio.AbstractEventLoop | None = None
     task: asyncio.Task | None = None
     stop_requested: bool = False
@@ -987,7 +987,8 @@ class AgentQueue:
         """The lane's first eligible request (P12): queued, and no earlier request of its conversation waits or runs."""
         if self._paused or self._changing or self._stopping:
             return None
-        running = [r for r in self._requests if r.status == "running"]
+        # A finished request still owns its reservations until _execute returns from cleanup.
+        running = [attempt.request for attempt in self._running.values()]
         peers = [r for r in running if r.lane == lane]
         if peers and (lane == "chat" or len(peers) >= REVIEW_WORKERS or any(r.kind != "review" for r in peers)):
             return None
@@ -1030,7 +1031,7 @@ class AgentQueue:
                 return False
             assert credentials is not None
             conversation = self._conversations[request.conversation_id]
-            running = _Running(request.id)
+            running = _Running(request)
             self._running[request.id] = running
             request.status, request.started_at = "running", time.time()
             if request.model is None:
@@ -1290,7 +1291,7 @@ class AgentQueue:
 
     def _emit_progress(self, running: _Running, conversation: AgentConversationState) -> None:
         running.progress_at, running.progress_pending = time.monotonic(), False
-        self.events.publish("request_progress", {"request_id": running.request_id,
+        self.events.publish("request_progress", {"request_id": running.request.id,
                                                  "conversation_id": conversation.id,
                                                  "live": _copy_live(conversation.live)})
 
@@ -1298,7 +1299,7 @@ class AgentQueue:
         with self._lock:
             running.flush_scheduled = False
             live = conversation.live
-            if running.progress_pending and live is not None and live["request_id"] == running.request_id:
+            if running.progress_pending and live is not None and live["request_id"] == running.request.id:
                 self._emit_progress(running, conversation)
 
 

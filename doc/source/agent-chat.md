@@ -258,8 +258,9 @@ text response is not proof of persistence.
 The server keeps one AI queue per process (`agent_queue`), shared by every tab
 and CLI run. The `action` lane runs up to five reviews of different assessments
 at once, or one other action. The `chat` lane runs one message, so a chat never waits
-behind an action. A request also waits for the earlier requests of its own
-conversation. A failed request blocks nothing and stays listed for retry or
+behind an action in a different conversation. Each turn holds its lane slot,
+conversation and (for reviews) assessment until session cleanup finishes.
+A failed request then blocks nothing and stays listed for retry or
 removal; **Stop** cancels a running turn's task, which ends `cancelled` with
 what it saved. When no request can run (no AI configuration, invalid
 configuration, GitHub signed out), the queue is paused with a reason; sign-in,
