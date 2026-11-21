@@ -263,7 +263,8 @@ conversation and (for reviews) assessment until session cleanup finishes.
 A failed request then blocks nothing and stays listed for retry or
 removal; **Stop** cancels a running turn's task, which ends `cancelled` with
 what it saved. Workers checking the same connection concurrently share a
-readiness check. Resuming the queue discards results from earlier checks.
+readiness check. Resuming the queue frees workers waiting on an earlier
+check to start fresh work without waiting for that provider call to return.
 A failed check pauses the queue only if the request still
 qualifies to run on that connection. The pause includes a reason (no AI
 configuration, invalid configuration, or GitHub signed out); sign-in,

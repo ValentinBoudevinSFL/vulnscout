@@ -436,18 +436,29 @@ def test_messages_carry_their_browser_context(env):
     assert env.deleted == ["s-" + request["id"]]
 
 
+def _observe_probe_peers(queue, monkeypatch, count):
+    joined = threading.Event()
+    peers = set()
+    wait_for = queue._cond.wait_for
+
+    def observe(predicate):
+        if not predicate():
+            peers.add(threading.current_thread())
+            if len(peers) == count:
+                joined.set()
+        return wait_for(predicate)
+
+    monkeypatch.setattr(queue._cond, "wait_for", observe)
+    return joined
+
+
 def test_workers_check_provider_once_for_the_same_candidate(env, monkeypatch):
     from src.routes import agent
 
     _config("AI_PROVIDER=local\nAI_BASE_URL=http://localhost:8080/v1\n")
     probes = []
-    checking, joined = threading.Event(), threading.Event()
-
-    class ObservedFuture(aq.Future):
-        def result(self, timeout=None):
-            if not self.done():
-                joined.set()
-            return super().result(timeout)
+    checking = threading.Event()
+    joined = _observe_probe_peers(env.q, monkeypatch, 1)
 
     def models(connection, base_url):
         probes.append(base_url)
@@ -459,7 +470,6 @@ def test_workers_check_provider_once_for_the_same_candidate(env, monkeypatch):
     monkeypatch.setattr(agent, "_fetch_provider_models", lambda *args: b'{"data":[{"id":"m"}]}')
     [request], _ = env.q.enqueue("per-action", "web", [_assess()], model="m")
     monkeypatch.setattr(agent, "_fetch_provider_models", models)
-    monkeypatch.setattr(aq, "Future", ObservedFuture)
     worker, result = _thread(env.q.run_once, "action")
     try:
         assert checking.wait(5)
@@ -500,6 +510,32 @@ def test_strict_enqueue_replaces_inflight_worker_probe(env, monkeypatch, old_pro
     assert not worker.is_alive() and result["value"] is None
     assert env.q.paused is None and _status(env, old["id"]) == "queued"
     assert env.q.run_once("chat") == old["id"]
+
+
+def test_resume_releases_workers_waiting_on_an_obsolete_probe(env, monkeypatch):
+    joined = _observe_probe_peers(env.q, monkeypatch, aq.REVIEW_WORKERS)
+    checking, release = threading.Event(), threading.Event()
+    load = env.q._load_credentials
+
+    def check(strict=False):
+        if not strict and not checking.is_set():
+            checking.set()
+            assert release.wait(30)
+        return load(strict)
+
+    monkeypatch.setattr(env.q, "_load_credentials", check)
+    env.q.enqueue("main", "web", [_message()], model="m")
+    env.q.start()
+    try:
+        assert checking.wait(5)
+        [old], _ = env.q.enqueue("per-action", "web", [_assess()], model="m")
+        assert joined.wait(5)
+        env.q.remove(old["id"])
+        [new], _ = env.q.enqueue("per-action", "cli", [_assess()], model="m", require_ready=True)
+        _wait(lambda: _status(env, new["id"]) == "done", timeout=5)
+    finally:
+        release.set()
+        env.q.shutdown()
 
 
 @pytest.mark.parametrize("failed_probe", [False, True])

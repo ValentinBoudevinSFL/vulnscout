@@ -1048,16 +1048,19 @@ class AgentQueue:
                 with self._cond:
                     check.set_exception(exc)
                     del self._checks[epoch]
+                    self._cond.notify_all()
                 raise
-            check.set_result((credentials, problem, model))
-        # Wait outside the queue lock. Keep the check available until a worker
-        # can claim its candidate (or publish the failure) under the lock.
-        credentials, problem, model = check.result()
         with self._cond:
             if owner:
+                check.set_result((credentials, problem, model))
                 del self._checks[epoch]
-            if self._readiness_epoch != epoch:
+                self._cond.notify_all()
+            else:
+                # A resume can free these workers before the old provider call returns.
+                self._cond.wait_for(lambda: self._stopping or self._readiness_epoch != epoch or check.done())
+            if self._stopping or self._readiness_epoch != epoch:
                 return False
+            credentials, problem, model = check.result()
             request = self._next(lane)
             if request is None or request.id != request_id:
                 return False
