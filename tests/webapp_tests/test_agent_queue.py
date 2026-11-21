@@ -1212,13 +1212,16 @@ def action_timeout():
 
 @pytest.mark.parametrize("app", ["reviews.sqlite"], indirect=True)
 def test_five_reviews_run_with_isolated_guards_and_stop_independently(env, monkeypatch):
+    from src.models.assessment_review import AssessmentReview
     from src.routes import agent
+    from ..cli_tests.test_cmd_ai_review import _put_review
 
     arrivals = Queue()
     release = threading.Event()
 
     async def wait_for_release(conversation, message, path, model, scope, publish=None, **kwargs):
-        arrivals.put(kwargs["api_url"])
+        [target] = json.loads(scope)["review_targets"]
+        arrivals.put({"api_url": kwargs["api_url"], "message": message, "target": target})
         while not release.is_set():
             await asyncio.sleep(0.01)
         return "done", dict(USAGE)
@@ -1229,10 +1232,19 @@ def test_five_reviews_run_with_isolated_guards_and_stop_independently(env, monke
     created, _ = env.q.enqueue("per-action", "web", actions, model="m")
     env.q.start()
     try:
-        assert len({arrivals.get(timeout=10) for _ in range(5)}) == 5
+        calls = [arrivals.get(timeout=10) for _ in range(5)]
+        assert len({call["api_url"] for call in calls}) == 5
         assert [_status(env, r["id"]) for r in created] == ["running"] * 5 + ["queued"]
+        target = calls[0]["target"]
+        assert _put_review({**calls[0], "api_url": calls[1]["api_url"]}, target)[0] == 403
+        for call in calls:
+            assert _put_review(call, call["target"])[0] == 200
+        with env.app.app_context():
+            for call in calls:
+                [saved] = AssessmentReview.get_all_for_assessment(uuid.UUID(call["target"]["assessment_id"]))
+                assert saved.rationale == "Independent analysis."
         env.q.stop(created[2]["id"])
-        assert arrivals.get(timeout=10).startswith("http://127.0.0.1:")
+        assert arrivals.get(timeout=10)["target"]["assessment_id"] == actions[5]["assessment_id"]
         assert _status(env, created[2]["id"]) == "cancelled" and _status(env, created[5]["id"]) == "running"
         assert all(_status(env, created[i]["id"]) == "running" for i in (0, 1, 3, 4))
     finally:
