@@ -264,9 +264,9 @@ A failed request then blocks nothing and stays listed for retry or
 removal; **Stop** cancels a running turn's task, which ends `cancelled` with
 what it saved. Review workers waiting on the same successful readiness check
 can each start an eligible review without repeating provider discovery.
-Chat checks readiness independently of actions. Resuming the queue frees
-workers waiting on an earlier check to start fresh work without waiting for
-that provider call to return.
+Chat checks readiness independently of actions. Resuming the queue or removing
+the request being checked frees waiting workers to check the next eligible
+request without waiting for the old provider call to return.
 A failed check pauses the queue only if the request still
 qualifies to run on that connection. The pause includes a reason (no AI
 configuration, invalid configuration, or GitHub signed out); sign-in,

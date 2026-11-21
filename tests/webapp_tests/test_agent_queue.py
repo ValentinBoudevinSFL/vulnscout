@@ -575,6 +575,41 @@ def test_chat_does_not_wait_for_a_removed_actions_probe(env, monkeypatch):
     assert env.q.paused is None
 
 
+@pytest.mark.parametrize("app", ["replacement.sqlite"], indirect=True)
+def test_review_workers_detach_from_a_removed_reviews_probe(env, monkeypatch):
+    joined = _observe_probe_peers(env.q, monkeypatch, aq.REVIEW_WORKERS - 1)
+    checking, release = threading.Event(), threading.Event()
+    load = env.q._load_credentials
+
+    def check():
+        if not checking.is_set():
+            checking.set()
+            assert release.wait(30)
+            return None, {"code": "invalid_config", "error": "timed out"}
+        return load()
+
+    monkeypatch.setattr(env.q, "_load_credentials", check)
+    actions = [{"kind": "review", "assessment_id": _custom(env, [("arm", "openssl")])} for _ in range(2)]
+    (old, new), _ = env.q.enqueue("per-action", "web", actions, model="m")
+    started = threading.Event()
+
+    async def run_replacement(call):
+        assert call.request.id == new["id"]
+        started.set()
+        return await ok(call)
+
+    env.q._runner = run_replacement
+    env.q.start()
+    try:
+        assert checking.wait(5) and joined.wait(5)
+        env.q.remove(old["id"])
+        assert started.wait(5)
+    finally:
+        release.set()
+        env.q.shutdown()
+    assert env.q.paused is None
+
+
 def test_resume_releases_workers_waiting_on_an_obsolete_probe(env, monkeypatch):
     joined = _observe_probe_peers(env.q, monkeypatch, aq.REVIEW_WORKERS - 1)
     checking, release = threading.Event(), threading.Event()

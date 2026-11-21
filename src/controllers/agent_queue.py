@@ -331,7 +331,7 @@ class AgentQueue:
         self._generation = 0  # bumped when a connection change starts; a turn's credentials must predate none
         self._readiness_epoch = 0  # a wake also invalidates probes without changing the connection
         self._checks: dict[
-            tuple[Lane, int], Future[tuple[AgentCredentials | None, dict[str, str] | None, str | None]]
+            tuple[Lane, int, str], Future[tuple[AgentCredentials | None, dict[str, str] | None, str | None]]
         ] = {}
         self._revision = 0  # bumped when the connection or model changed; tabs reload their setup on a change
         self._stopping = False
@@ -1034,7 +1034,7 @@ class AgentQueue:
             if candidate is None or candidate.id != request_id:
                 return None
             epoch = self._readiness_epoch
-            key = (lane, epoch)
+            key = (lane, epoch, request_id)
             check = self._checks.get(key)
             owner = check is None
             if check is None:
@@ -1059,9 +1059,10 @@ class AgentQueue:
                 del self._checks[key]
                 self._cond.notify_all()
             else:
-                # A resume can free these workers before the old provider call returns.
-                self._cond.wait_for(lambda: self._stopping or self._readiness_epoch != epoch or check.done())
-            if self._stopping or self._readiness_epoch != epoch:
+                # Resume or removal can free peers before the old provider call returns.
+                self._cond.wait_for(lambda: check.done() or self._readiness_epoch != epoch
+                                    or self._next(lane) is not candidate)
+            if not check.done() or self._stopping or self._readiness_epoch != epoch:
                 return None
             credentials, problem, model = check.result()
             request = self._next(lane)
