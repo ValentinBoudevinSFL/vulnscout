@@ -489,6 +489,7 @@ def test_five_reviews_share_one_successful_provider_probe(env, monkeypatch):
 
     _config("AI_PROVIDER=local\nAI_BASE_URL=http://localhost:8080/v1\n")
     actions = [{"kind": "review", "assessment_id": _custom(env, [("arm", "openssl")])} for _ in range(5)]
+    monkeypatch.setattr(agent, "_fetch_provider_models", lambda *args: b'{"data":[{"id":"m"}]}')
     created, _ = env.q.enqueue("per-action", "web", actions, model="m")
     joined = _observe_probe_peers(env.q, monkeypatch, 4)
     probes = []
