@@ -512,8 +512,33 @@ def test_strict_enqueue_replaces_inflight_worker_probe(env, monkeypatch, old_pro
     assert env.q.run_once("chat") == old["id"]
 
 
+def test_chat_does_not_wait_for_a_removed_actions_probe(env, monkeypatch):
+    checking, release = threading.Event(), threading.Event()
+    load = env.q._load_credentials
+
+    def check():
+        if not checking.is_set():
+            checking.set()
+            assert release.wait(30)
+            return None, {"code": "invalid_config", "error": "timed out"}
+        return load()
+
+    monkeypatch.setattr(env.q, "_load_credentials", check)
+    [old], _ = env.q.enqueue("per-action", "web", [_assess()], model="m")
+    env.q.start()
+    try:
+        assert checking.wait(5)
+        env.q.remove(old["id"])
+        [chat], _ = env.q.enqueue("main", "web", [_message()], model="m")
+        _wait(lambda: _status(env, chat["id"]) == "done", timeout=5)
+    finally:
+        release.set()
+        env.q.shutdown()
+    assert env.q.paused is None
+
+
 def test_resume_releases_workers_waiting_on_an_obsolete_probe(env, monkeypatch):
-    joined = _observe_probe_peers(env.q, monkeypatch, aq.REVIEW_WORKERS)
+    joined = _observe_probe_peers(env.q, monkeypatch, aq.REVIEW_WORKERS - 1)
     checking, release = threading.Event(), threading.Event()
     load = env.q._load_credentials
 
@@ -524,11 +549,10 @@ def test_resume_releases_workers_waiting_on_an_obsolete_probe(env, monkeypatch):
         return load(strict)
 
     monkeypatch.setattr(env.q, "_load_credentials", check)
-    env.q.enqueue("main", "web", [_message()], model="m")
+    [old], _ = env.q.enqueue("per-action", "web", [_assess()], model="m")
     env.q.start()
     try:
         assert checking.wait(5)
-        [old], _ = env.q.enqueue("per-action", "web", [_assess()], model="m")
         assert joined.wait(5)
         env.q.remove(old["id"])
         [new], _ = env.q.enqueue("per-action", "cli", [_assess()], model="m", require_ready=True)

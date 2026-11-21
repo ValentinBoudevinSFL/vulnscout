@@ -330,7 +330,9 @@ class AgentQueue:
         self._changing = False
         self._generation = 0  # bumped when a connection change starts; a turn's credentials must predate none
         self._readiness_epoch = 0  # a wake also invalidates probes without changing the connection
-        self._checks: dict[int, Future[tuple[AgentCredentials | None, dict[str, str] | None, str | None]]] = {}
+        self._checks: dict[
+            tuple[Lane, int], Future[tuple[AgentCredentials | None, dict[str, str] | None, str | None]]
+        ] = {}
         self._revision = 0  # bumped when the connection or model changed; tabs reload their setup on a change
         self._stopping = False
         self._verified_token: str | None = None
@@ -1032,11 +1034,12 @@ class AgentQueue:
             if candidate is None or candidate.id != request_id:
                 return False
             epoch = self._readiness_epoch
-            check = self._checks.get(epoch)
+            key = (lane, epoch)
+            check = self._checks.get(key)
             owner = check is None
             if check is None:
-                self._checks[epoch] = check = Future()
-                unresolved = any(r.status == "queued" and r.model is None for r in self._requests)
+                self._checks[key] = check = Future()
+                unresolved = any(r.lane == lane and r.status == "queued" and r.model is None for r in self._requests)
         if owner:
             try:
                 credentials, problem = self._load_credentials()
@@ -1047,13 +1050,13 @@ class AgentQueue:
             except BaseException as exc:
                 with self._cond:
                     check.set_exception(exc)
-                    del self._checks[epoch]
+                    del self._checks[key]
                     self._cond.notify_all()
                 raise
         with self._cond:
             if owner:
                 check.set_result((credentials, problem, model))
-                del self._checks[epoch]
+                del self._checks[key]
                 self._cond.notify_all()
             else:
                 # A resume can free these workers before the old provider call returns.
