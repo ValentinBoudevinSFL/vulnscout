@@ -441,35 +441,65 @@ def test_workers_check_provider_once_for_the_same_candidate(env, monkeypatch):
 
     _config("AI_PROVIDER=local\nAI_BASE_URL=http://localhost:8080/v1\n")
     probes = []
-    checking, selected = threading.Event(), threading.Event()
+    checking, joined = threading.Event(), threading.Event()
+
+    class ObservedFuture(aq.Future):
+        def result(self, timeout=None):
+            if not self.done():
+                joined.set()
+            return super().result(timeout)
 
     def models(connection, base_url):
         probes.append(base_url)
+        assert len(probes) == 1, "second worker started a duplicate provider probe"
         checking.set()
-        assert selected.wait(5)
+        assert joined.wait(5)
         return b'{"data":[{"id":"m"}]}'
 
     monkeypatch.setattr(agent, "_fetch_provider_models", lambda *args: b'{"data":[{"id":"m"}]}')
     [request], _ = env.q.enqueue("per-action", "web", [_assess()], model="m")
     monkeypatch.setattr(agent, "_fetch_provider_models", models)
+    monkeypatch.setattr(aq, "Future", ObservedFuture)
     worker, result = _thread(env.q.run_once, "action")
     try:
         assert checking.wait(5)
-        next_request = env.q._next
-
-        def select(lane):
-            candidate = next_request(lane)
-            selected.set()
-            return candidate
-
-        monkeypatch.setattr(env.q, "_next", select)
         other = env.q.run_once("action")
+        assert joined.is_set()
     finally:
-        selected.set()
+        joined.set()
         worker.join(5)
     assert not worker.is_alive() and {result["value"], other} == {request["id"], None}
     assert len(probes) == 1
     assert env.q.paused is None
+
+
+@pytest.mark.parametrize("old_probe_fails", [False, True])
+def test_strict_enqueue_replaces_inflight_worker_probe(env, monkeypatch, old_probe_fails):
+    [old], _ = env.q.enqueue("main", "web", [_message()], model="m")
+    load = env.q._load_credentials
+    checking, release = threading.Event(), threading.Event()
+
+    def check(strict=False):
+        result = load(strict)
+        if not strict and not checking.is_set():
+            checking.set()
+            assert release.wait(5)
+            if old_probe_fails:
+                return None, {"code": "invalid_config", "error": "timed out"}
+        return result
+
+    monkeypatch.setattr(env.q, "_load_credentials", check)
+    worker, result = _thread(env.q.run_once, "chat")
+    try:
+        assert checking.wait(5)
+        [new], _ = env.q.enqueue("per-action", "cli", [_assess()], model="m", require_ready=True)
+        assert env.q.run_once("action") == new["id"]
+    finally:
+        release.set()
+        worker.join(5)
+    assert not worker.is_alive() and result["value"] is None
+    assert env.q.paused is None and _status(env, old["id"]) == "queued"
+    assert env.q.run_once("chat") == old["id"]
 
 
 @pytest.mark.parametrize("failed_probe", [False, True])

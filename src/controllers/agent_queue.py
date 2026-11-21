@@ -329,6 +329,7 @@ class AgentQueue:
         self._paused: dict[str, str] | None = None
         self._changing = False
         self._generation = 0  # bumped when a connection change starts; a turn's credentials must predate none
+        self._readiness_epoch = 0  # a wake also invalidates probes without changing the connection
         self._checks: dict[int, Future[tuple[AgentCredentials | None, dict[str, str] | None, str | None]]] = {}
         self._revision = 0  # bumped when the connection or model changed; tabs reload their setup on a change
         self._stopping = False
@@ -428,6 +429,9 @@ class AgentQueue:
         """
         from ..bin._ai_runner import GITHUB_SIGNED_OUT, NO_AI_CONFIG
 
+        with self._lock:
+            epoch = self._readiness_epoch
+            logged_in, verified_token = self._verified_logged_in, self._verified_token
         agent = _agent()
         root = agent.Conversation()
         error = agent._load_env_credentials(root)
@@ -437,7 +441,7 @@ class AgentQueue:
         if not credentials.token and not credentials.provider:
             if strict:
                 return None, {"code": "no_ai_config", "error": NO_AI_CONFIG}
-            if not self._verified_logged_in:
+            if not logged_in:
                 try:
                     auth = asyncio.run(agent._auth_status(None))
                 except Exception:
@@ -445,10 +449,12 @@ class AgentQueue:
                     auth = {"authenticated": False}
                 if not auth["authenticated"]:
                     return None, {"code": "no_ai_config", "error": NO_AI_CONFIG}
-                self._verified_logged_in = True
+                with self._lock:
+                    if epoch == self._readiness_epoch:
+                        self._verified_logged_in = True
             return credentials, None
         token = credentials.token
-        if token and not credentials.provider and token != self._verified_token:
+        if token and not credentials.provider and token != verified_token:
             try:
                 auth = asyncio.run(agent._token_status(token))
             except Exception:
@@ -457,7 +463,9 @@ class AgentQueue:
                 return credentials, None
             if not auth["authenticated"]:
                 return None, {"code": "github_signed_out", "error": GITHUB_SIGNED_OUT}
-            self._verified_token = token
+            with self._lock:
+                if epoch == self._readiness_epoch:
+                    self._verified_token = token
         return credentials, None
 
     def readiness(self) -> dict[str, str] | None:
@@ -946,6 +954,7 @@ class AgentQueue:
                 raise QueueBusy(BUSY)
             self._changing = True
             self._generation += 1
+            self._readiness_epoch += 1
         change = ConnectionChange()
         try:
             yield change
@@ -973,6 +982,7 @@ class AgentQueue:
     def wake(self) -> None:
         """Resume a paused queue (after sign-in, a provider or model change): requests are retried."""
         with self._cond:
+            self._readiness_epoch += 1
             self._verified_token = None
             self._verified_logged_in = False
             if self._paused is not None:
@@ -1021,11 +1031,11 @@ class AgentQueue:
             candidate = self._next(lane)
             if candidate is None or candidate.id != request_id:
                 return False
-            generation = self._generation
-            check = self._checks.get(generation)
+            epoch = self._readiness_epoch
+            check = self._checks.get(epoch)
             owner = check is None
             if check is None:
-                self._checks[generation] = check = Future()
+                self._checks[epoch] = check = Future()
                 unresolved = any(r.status == "queued" and r.model is None for r in self._requests)
         if owner:
             try:
@@ -1037,7 +1047,7 @@ class AgentQueue:
             except BaseException as exc:
                 with self._cond:
                     check.set_exception(exc)
-                    del self._checks[generation]
+                    del self._checks[epoch]
                 raise
             check.set_result((credentials, problem, model))
         # Wait outside the queue lock. Keep the check available until a worker
@@ -1045,9 +1055,9 @@ class AgentQueue:
         credentials, problem, model = check.result()
         with self._cond:
             if owner:
-                del self._checks[generation]
-            if self._generation != generation:
-                return False  # the connection changed while loading: the worker reloads them
+                del self._checks[epoch]
+            if self._readiness_epoch != epoch:
+                return False
             request = self._next(lane)
             if request is None or request.id != request_id:
                 return False
