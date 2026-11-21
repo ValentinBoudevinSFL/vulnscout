@@ -1026,13 +1026,13 @@ class AgentQueue:
             request = self._next(lane)
         if request is None:
             return None
-        return request.id if self._attempt(lane, request.id) else None
+        return self._attempt(lane, request.id)
 
-    def _attempt(self, lane: Lane, request_id: str) -> bool:
+    def _attempt(self, lane: Lane, request_id: str) -> str | None:
         with self._cond:
             candidate = self._next(lane)
             if candidate is None or candidate.id != request_id:
-                return False
+                return None
             epoch = self._readiness_epoch
             key = (lane, epoch)
             check = self._checks.get(key)
@@ -1062,16 +1062,20 @@ class AgentQueue:
                 # A resume can free these workers before the old provider call returns.
                 self._cond.wait_for(lambda: self._stopping or self._readiness_epoch != epoch or check.done())
             if self._stopping or self._readiness_epoch != epoch:
-                return False
+                return None
             credentials, problem, model = check.result()
             request = self._next(lane)
-            if request is None or request.id != request_id:
-                return False
+            if request is None:
+                return None
+            if request.id != request_id:
+                # Peers of a successfully admitted review can claim the next eligible review.
+                if owner or problem is not None or request_id not in self._running or request.kind != "review":
+                    return None
             if problem is not None:
                 self._pause(problem["code"], problem["error"])
-                return False
+                return None
             if request.model is None and model is None:
-                return False
+                return None
             assert credentials is not None
             conversation = self._conversations[request.conversation_id]
             running = _Running(request)
@@ -1090,7 +1094,7 @@ class AgentQueue:
             with self._cond:
                 self._running.pop(request.id)
                 self._cond.notify_all()
-        return True
+        return request.id
 
     def _ensure_workers(self) -> None:
         if self._autostart:

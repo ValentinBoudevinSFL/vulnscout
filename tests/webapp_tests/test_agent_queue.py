@@ -483,6 +483,44 @@ def test_workers_check_provider_once_for_the_same_candidate(env, monkeypatch):
     assert env.q.paused is None
 
 
+@pytest.mark.parametrize("app", ["batch.sqlite"], indirect=True)
+def test_five_reviews_share_one_successful_provider_probe(env, monkeypatch):
+    from src.routes import agent
+
+    _config("AI_PROVIDER=local\nAI_BASE_URL=http://localhost:8080/v1\n")
+    actions = [{"kind": "review", "assessment_id": _custom(env, [("arm", "openssl")])} for _ in range(5)]
+    created, _ = env.q.enqueue("per-action", "web", actions, model="m")
+    joined = _observe_probe_peers(env.q, monkeypatch, 4)
+    probes = []
+
+    def models(connection, base_url):
+        probes.append(base_url)
+        assert joined.wait(5)
+        return b'{"data":[{"id":"m"}]}'
+
+    monkeypatch.setattr(agent, "_fetch_provider_models", models)
+    arrivals = Queue()
+    release = threading.Event()
+
+    async def hold(call):
+        arrivals.put(call.request.id)
+        while not release.is_set():
+            await asyncio.sleep(0.01)
+        return await ok(call)
+
+    env.q._runner = hold
+    workers = [_thread(env.q.run_once, "action") for _ in created]
+    expected = {request["id"] for request in created}
+    try:
+        assert {arrivals.get(timeout=5) for _ in created} == expected
+        assert len(probes) == 1
+    finally:
+        release.set()
+        for worker, _ in workers:
+            worker.join(5)
+    assert {result["value"] for _, result in workers} == expected
+
+
 @pytest.mark.parametrize("old_probe_fails", [False, True])
 def test_strict_enqueue_replaces_inflight_worker_probe(env, monkeypatch, old_probe_fails):
     [old], _ = env.q.enqueue("main", "web", [_message()], model="m")

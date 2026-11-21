@@ -262,8 +262,9 @@ behind an action in a different conversation. Each turn holds its lane slot,
 conversation and (for reviews) assessment until session cleanup finishes.
 A failed request then blocks nothing and stays listed for retry or
 removal; **Stop** cancels a running turn's task, which ends `cancelled` with
-what it saved. Workers within a lane share an in-flight readiness check;
-chat checks readiness independently of actions. Resuming the queue frees
+what it saved. Review workers waiting on the same successful readiness check
+can each start an eligible review without repeating provider discovery.
+Chat checks readiness independently of actions. Resuming the queue frees
 workers waiting on an earlier check to start fresh work without waiting for
 that provider call to return.
 A failed check pauses the queue only if the request still
