@@ -9,6 +9,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
+from queue import Queue
 from types import SimpleNamespace
 
 import pytest
@@ -544,6 +545,27 @@ def test_remove_clear_and_retry(env):
     assert env.q.clear() == 2 and env.q.snapshot()["requests"] == []
     with pytest.raises(aq.QueueConflict):
         env.q.stop(a)
+
+
+def test_review_retry_waits_for_failed_attempt_cleanup(env, monkeypatch):
+    assessment_id = _custom(env, [("arm", "openssl")])
+    [request], _ = env.q.enqueue("per-action", "web", [{"kind": "review", "assessment_id": assessment_id}], model="m")
+    request_id = request["id"]
+    env.fake.script["review"].append(raising(RuntimeError("failed review")))
+    attempted = []
+
+    def retry_during_cleanup(sessions):
+        if sessions:
+            env.q.retry(request_id)
+            attempted.append(env.q.run_once("action"))
+        return False
+
+    with monkeypatch.context() as patch:
+        patch.setattr(env.q, "_delete_sessions", retry_during_cleanup)
+        assert env.q.run_once("action") == request_id
+    assert attempted == [None]
+    assert _status(env, request_id) == "queued"
+    assert env.q.run_once("action") == request_id
 
 
 def test_stop_cancels_a_running_turn_and_keeps_its_writes(env):
@@ -1158,14 +1180,15 @@ def action_timeout():
     return agent_skills.ACTION_TIMEOUT
 
 
+@pytest.mark.parametrize("app", ["reviews.sqlite"], indirect=True)
 def test_five_reviews_run_with_isolated_guards_and_stop_independently(env, monkeypatch):
     from src.routes import agent
 
-    urls = set()
+    arrivals = Queue()
     release = threading.Event()
 
     async def wait_for_release(conversation, message, path, model, scope, publish=None, **kwargs):
-        urls.add(kwargs["api_url"])
+        arrivals.put(kwargs["api_url"])
         while not release.is_set():
             await asyncio.sleep(0.01)
         return "done", dict(USAGE)
@@ -1176,10 +1199,11 @@ def test_five_reviews_run_with_isolated_guards_and_stop_independently(env, monke
     created, _ = env.q.enqueue("per-action", "web", actions, model="m")
     env.q.start()
     try:
-        _wait(lambda: len(urls) == 5)
+        assert len({arrivals.get(timeout=10) for _ in range(5)}) == 5
         assert [_status(env, r["id"]) for r in created] == ["running"] * 5 + ["queued"]
         env.q.stop(created[2]["id"])
-        _wait(lambda: _status(env, created[2]["id"]) == "cancelled" and _status(env, created[5]["id"]) == "running")
+        assert arrivals.get(timeout=10).startswith("http://127.0.0.1:")
+        assert _status(env, created[2]["id"]) == "cancelled" and _status(env, created[5]["id"]) == "running"
         assert all(_status(env, created[i]["id"]) == "running" for i in (0, 1, 3, 4))
     finally:
         release.set()

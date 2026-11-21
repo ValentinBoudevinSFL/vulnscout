@@ -999,7 +999,8 @@ class AgentQueue:
             if request.lane == lane and request.conversation_id not in busy:
                 if peers and request.kind != "review":
                     return None  # do not let later reviews starve an exclusive action
-                if request.assessment_id not in assessments:
+                # A retry can already be queued while the failed attempt cleans up its sessions.
+                if request.id not in self._running and request.assessment_id not in assessments:
                     return request
             busy.add(request.conversation_id)
         return None
