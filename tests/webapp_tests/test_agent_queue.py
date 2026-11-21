@@ -436,16 +436,54 @@ def test_messages_carry_their_browser_context(env):
     assert env.deleted == ["s-" + request["id"]]
 
 
-def test_a_request_that_is_no_longer_next_does_not_start(env, monkeypatch):
+def test_workers_check_provider_once_for_the_same_candidate(env, monkeypatch):
+    from src.routes import agent
+
+    _config("AI_PROVIDER=local\nAI_BASE_URL=http://localhost:8080/v1\n")
+    probes = []
+    checking, selected = threading.Event(), threading.Event()
+
+    def models(connection, base_url):
+        probes.append(base_url)
+        checking.set()
+        assert selected.wait(5)
+        return b'{"data":[{"id":"m"}]}'
+
+    monkeypatch.setattr(agent, "_fetch_provider_models", lambda *args: b'{"data":[{"id":"m"}]}')
+    [request], _ = env.q.enqueue("per-action", "web", [_assess()], model="m")
+    monkeypatch.setattr(agent, "_fetch_provider_models", models)
+    worker, result = _thread(env.q.run_once, "action")
+    try:
+        assert checking.wait(5)
+        next_request = env.q._next
+
+        def select(lane):
+            candidate = next_request(lane)
+            selected.set()
+            return candidate
+
+        monkeypatch.setattr(env.q, "_next", select)
+        other = env.q.run_once("action")
+    finally:
+        selected.set()
+        worker.join(5)
+    assert not worker.is_alive() and {result["value"], other} == {request["id"], None}
+    assert len(probes) == 1
+    assert env.q.paused is None
+
+
+@pytest.mark.parametrize("failed_probe", [False, True])
+def test_a_request_that_is_no_longer_next_does_not_start_or_pause(env, monkeypatch, failed_probe):
     [request], _ = env.q.enqueue("main", "web", [_message()], model="m")
     load = env.q._load_credentials
 
     def remove_while_loading():
         env.q.remove(request["id"])
-        return load()
+        return (None, {"code": "invalid_config", "error": "rate limited"}) if failed_probe else load()
 
     monkeypatch.setattr(env.q, "_load_credentials", remove_while_loading)
     assert env.q.run_once("chat") is None and env.fake.calls == []
+    assert env.q.paused is None
 
 
 def test_credentials_loaded_before_a_connection_change_are_not_used(env, monkeypatch):

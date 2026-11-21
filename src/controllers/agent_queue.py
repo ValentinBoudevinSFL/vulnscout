@@ -29,6 +29,7 @@ import threading
 import time
 import uuid
 from collections import OrderedDict
+from concurrent.futures import Future
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Callable, Coroutine, Iterator, Literal
@@ -328,6 +329,7 @@ class AgentQueue:
         self._paused: dict[str, str] | None = None
         self._changing = False
         self._generation = 0  # bumped when a connection change starts; a turn's credentials must predate none
+        self._checks: dict[int, Future[tuple[AgentCredentials | None, dict[str, str] | None, str | None]]] = {}
         self._revision = 0  # bumped when the connection or model changed; tabs reload their setup on a change
         self._stopping = False
         self._verified_token: str | None = None
@@ -1016,18 +1018,43 @@ class AgentQueue:
 
     def _attempt(self, lane: Lane, request_id: str) -> bool:
         with self._cond:
+            candidate = self._next(lane)
+            if candidate is None or candidate.id != request_id:
+                return False
             generation = self._generation
-            unresolved = any(request.id == request_id and request.model is None for request in self._requests)
-        credentials, problem = self._load_credentials()
-        model = self._configured_model()[0] if unresolved else None
+            check = self._checks.get(generation)
+            owner = check is None
+            if check is None:
+                self._checks[generation] = check = Future()
+                unresolved = any(r.status == "queued" and r.model is None for r in self._requests)
+        if owner:
+            try:
+                credentials, problem = self._load_credentials()
+                model = self._configured_model()[0] if unresolved and problem is None else None
+            except Exception:
+                _logger.exception("The AI queue readiness check failed")
+                credentials, problem, model = None, {"code": "error", "error": WORKER_ERROR}, None
+            except BaseException as exc:
+                with self._cond:
+                    check.set_exception(exc)
+                    del self._checks[generation]
+                raise
+            check.set_result((credentials, problem, model))
+        # Wait outside the queue lock. Keep the check available until a worker
+        # can claim its candidate (or publish the failure) under the lock.
+        credentials, problem, model = check.result()
         with self._cond:
+            if owner:
+                del self._checks[generation]
             if self._generation != generation:
                 return False  # the connection changed while loading: the worker reloads them
+            request = self._next(lane)
+            if request is None or request.id != request_id:
+                return False
             if problem is not None:
                 self._pause(problem["code"], problem["error"])
                 return False
-            request = self._next(lane)
-            if request is None or request.id != request_id or (request.model is None and model is None):
+            if request.model is None and model is None:
                 return False
             assert credentials is not None
             conversation = self._conversations[request.conversation_id]
