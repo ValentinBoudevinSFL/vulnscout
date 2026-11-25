@@ -411,6 +411,51 @@ describe('Vulnerability Table', () => {
         expect(screen.getByTestId('current-packages')).toHaveTextContent(/^scope-lib@2$/);
     });
 
+    test('Outdated switches the status summary and filter between current and historical targets', async () => {
+        const currentPackage = 'scope-lib@2';
+        const historicalPackage = 'scope-lib@1';
+        const current = {
+            ...vulnerabilities[0],
+            packages: [currentPackage],
+            packages_current: [currentPackage],
+            packages_current_by_variant: { 'variant-1': [currentPackage] },
+        };
+        const assessments = [currentPackage, historicalPackage].map((pkg, index) => ({
+            id: `status-${index}`, vuln_id: current.id, packages: [pkg], variant_id: 'variant-1',
+            origin: 'custom', status: index === 0 ? 'under_investigation' : 'fixed',
+            simplified_status: index === 0 ? 'Pending Assessment' : 'Fixed',
+            timestamp: '2026-11-01T12:00:00Z', responses: [],
+        }));
+        fetchMock.mockResponse(async request => JSON.stringify(new URL(request.url).pathname === '/api/vulnerabilities'
+            ? [{
+                ...current, packages: [currentPackage, historicalPackage],
+                packages_status_by_variant: { 'variant-1': [currentPackage, historicalPackage] },
+            }]
+            : assessments));
+        render(<TableVulnerabilities vulnerabilities={Vulnerabilities.enrich_with_assessments([current], assessments)}
+            variantId="variant-1" preferenceScopeKey="outdated-status-tests"
+            appendAssessment={() => {}} appendCVSS={() => null} patchVuln={() => {}} />);
+
+        const user = userEvent.setup();
+        expect(screen.getByRole('cell', { name: 'Pending Assessment' })).toBeVisible();
+        await user.click(screen.getByRole('button', { name: /^status$/i }));
+        expect(screen.queryByRole('checkbox', { name: 'Fixed' })).not.toBeInTheDocument();
+
+        await user.click(screen.getByRole('button', { name: 'Show Outdated' }));
+        expect(await screen.findByRole('cell', { name: 'Pending Assessment, Fixed' })).toBeVisible();
+        await user.click(screen.getByRole('button', { name: /^status$/i }));
+        await user.click(screen.getByRole('checkbox', { name: 'Fixed' }));
+        expect(screen.getByRole('cell', { name: 'Pending Assessment, Fixed' })).toBeVisible();
+
+        await user.click(screen.getByRole('button', { name: 'Hide Outdated' }));
+        expect(screen.queryByRole('cell', { name: /Pending Assessment/ })).not.toBeInTheDocument();
+        await user.click(screen.getByRole('button', { name: /^status$/i }));
+        const fixed = screen.getByRole('checkbox', { name: 'Fixed' });
+        expect(fixed).toBeChecked();
+        await user.click(fixed);
+        expect(screen.getByRole('cell', { name: 'Pending Assessment' })).toBeVisible();
+    });
+
     test('renders columns in a fixed canonical order regardless of saved toggle order', async () => {
         // ARRANGE - a scrambled visibleColumns order in local storage
         window.localStorage.setItem(

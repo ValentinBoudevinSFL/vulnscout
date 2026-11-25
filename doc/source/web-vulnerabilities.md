@@ -28,8 +28,9 @@ VulnScout provides several filter categories, each accessible from a dedicated d
   the newest assessment for each package/variant target in the selected scope.
   Historical assessments superseded for the same target do not contribute;
   updating one package does not hide another package's status. Status filters
-  match any listed status, and a vulnerability remains active while any current
-  target is active.
+  match any listed status. Selected statuses remain visible in the filter so
+  you can clear them even if the current scope has no matches. A vulnerability
+  remains active while any package target in the summary is active.
 - **Packages**: restrict the table to vulnerabilities affecting one or more of the selected packages.
   Use **Select all** to check every package or **Deselect all** to clear even a partial selection.
   Type in the search box to narrow the list. **Select all matching** and **Deselect all matching**
