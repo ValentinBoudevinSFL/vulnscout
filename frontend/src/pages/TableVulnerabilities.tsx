@@ -1655,6 +1655,7 @@ function TableVulnerabilities ({ vulnerabilities, filterLabel, filterValue, filt
                     placeholder="Search by ID, packages, description, ..."
                     ariaLabel="Search vulnerabilities"
                     loading={descriptionSearchLoading}
+                    inputClassName="py-1 px-2 bg-sky-900 focus:bg-sky-950 w-64 max-w-full"
                 />
             </div>
             {descriptionSearchError && (
