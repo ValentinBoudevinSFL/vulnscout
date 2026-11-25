@@ -22,11 +22,12 @@ from . import write_demo_files
 # ---------------------------------------------------------------------------
 
 def setup_db_with_project_variant(app):
-    """Set up the in-memory DB with two projects/variants and scoped data.
+    """Set up the in-memory DB with scoped data for two projects.
 
     Layout
     ------
     ProjectA / VariantA  →  CairoScan  →  cairo@1.16.0 / CVE-2020-35492
+    ProjectA / ComparisonVariant (empty)
     ProjectB / VariantB  →  BusyScan   →  busybox@1.35.0 (no vulnerability)
 
     The cairo finding has an Observation linked to CairoScan so that the
@@ -56,6 +57,7 @@ def setup_db_with_project_variant(app):
         # --- ProjectA / VariantA -----------------------------------------
         project_a = Project.create("ProjectA")
         variant_a = Variant.create("VariantA", project_a.id)
+        comparison_variant = Variant.create("ComparisonVariant", project_a.id)
         scan_a = Scan.create("scan for VariantA", variant_a.id)
 
         # Package + vulnerability + finding
@@ -135,6 +137,7 @@ def setup_db_with_project_variant(app):
             "project_a_id": str(project_a.id),
             "project_b_id": str(project_b.id),
             "variant_a_id": str(variant_a.id),
+            "comparison_variant_id": str(comparison_variant.id),
             "variant_b_id": str(variant_b.id),
         }
 
@@ -249,9 +252,8 @@ class TestVariantsEndpoint:
         assert response.status_code == 200
         body = json.loads(response.data)
         assert isinstance(body, list)
-        assert len(body) == 1
-        assert body[0]["name"] == "VariantA"
-        assert body[0]["project_id"] == project_id
+        assert {variant["name"] for variant in body} == {"VariantA", "ComparisonVariant"}
+        assert all(variant["project_id"] == project_id for variant in body)
 
     def test_list_variants_serialization(self, client_and_data):
         client, data = client_and_data
@@ -848,14 +850,14 @@ class TestVulnerabilitiesFiltering:
         response = client.get("/api/vulnerabilities?project_id=bad-uuid&format=list")
         assert response.status_code == 400
 
-    # Compare-filtering tests use the existing fixture:
-    # VariantA has CVE-2020-35492, VariantB has no vulnerabilities.
+    # Compare-filtering tests use two variants in ProjectA:
+    # VariantA has CVE-2020-35492, ComparisonVariant has no vulnerabilities.
 
     def test_vulnerabilities_compare_difference_returns_compare_unique_vulns(self, client_and_data):
         """difference(base=VB, compare=VA): vulns in VA but NOT in VB → CVE-2020-35492."""
         client, data = client_and_data
         variant_a_id = data["variant_a_id"]
-        variant_b_id = data["variant_b_id"]
+        variant_b_id = data["comparison_variant_id"]
         url = (
             f"/api/vulnerabilities?format=list"
             f"&variant_id={variant_b_id}"
@@ -872,7 +874,7 @@ class TestVulnerabilitiesFiltering:
         """difference(base=VA, compare=VB): vulns in VB but NOT in VA → empty (VB has none)."""
         client, data = client_and_data
         variant_a_id = data["variant_a_id"]
-        variant_b_id = data["variant_b_id"]
+        variant_b_id = data["comparison_variant_id"]
         url = (
             f"/api/vulnerabilities?format=list"
             f"&variant_id={variant_a_id}"
@@ -888,7 +890,7 @@ class TestVulnerabilitiesFiltering:
         """intersection(VA, VB): no common vulns → empty."""
         client, data = client_and_data
         variant_a_id = data["variant_a_id"]
-        variant_b_id = data["variant_b_id"]
+        variant_b_id = data["comparison_variant_id"]
         url = (
             f"/api/vulnerabilities?format=list"
             f"&variant_id={variant_a_id}"
@@ -934,7 +936,7 @@ class TestVulnerabilitiesFiltering:
     def test_vulnerabilities_compare_default_operation_is_difference(self, client_and_data):
         """Omitting operation defaults to difference."""
         client, data = client_and_data
-        variant_b_id = data["variant_b_id"]
+        variant_b_id = data["comparison_variant_id"]
         variant_a_id = data["variant_a_id"]
         url = (
             f"/api/vulnerabilities?format=list"
@@ -950,7 +952,7 @@ class TestVulnerabilitiesFiltering:
     def test_vulnerabilities_compare_unknown_operation_falls_back_to_difference(self, client_and_data):
         """An unrecognised operation value is treated as difference."""
         client, data = client_and_data
-        variant_b_id = data["variant_b_id"]
+        variant_b_id = data["comparison_variant_id"]
         variant_a_id = data["variant_a_id"]
         url = (
             f"/api/vulnerabilities?format=list"
@@ -991,7 +993,7 @@ class TestVulnerabilitiesFiltering:
         """union([VA, VB]): vulns in any selected variant → CVE-2020-35492."""
         client, data = client_and_data
         variant_a_id = data["variant_a_id"]
-        variant_b_id = data["variant_b_id"]
+        variant_b_id = data["comparison_variant_id"]
         url = (
             f"/api/vulnerabilities?format=list"
             f"&variant_ids={variant_a_id},{variant_b_id}"
@@ -1006,7 +1008,7 @@ class TestVulnerabilitiesFiltering:
         """Omitting operation defaults to union."""
         client, data = client_and_data
         variant_a_id = data["variant_a_id"]
-        variant_b_id = data["variant_b_id"]
+        variant_b_id = data["comparison_variant_id"]
         url = (
             f"/api/vulnerabilities?format=list"
             f"&variant_ids={variant_a_id},{variant_b_id}"
@@ -1020,7 +1022,7 @@ class TestVulnerabilitiesFiltering:
         """intersection([VA, VB]): no common vuln → empty."""
         client, data = client_and_data
         variant_a_id = data["variant_a_id"]
-        variant_b_id = data["variant_b_id"]
+        variant_b_id = data["comparison_variant_id"]
         url = (
             f"/api/vulnerabilities?format=list"
             f"&variant_ids={variant_a_id},{variant_b_id}"
