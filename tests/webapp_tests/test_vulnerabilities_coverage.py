@@ -690,38 +690,36 @@ def test_patch_batch_effort_ordering_error(client):
 # GET /api/vulnerabilities — compare_variant_id paths (lines 88, 100, 118)
 # ---------------------------------------------------------------------------
 
-def test_get_vulnerabilities_compare_base_none(client):
+@pytest.fixture
+def empty_comparison(app):
+    from src.models import Project, Variant
+
+    with app.app_context():
+        project = Project.create("EmptyComparison")
+        base = Variant.create("Base", project.id)
+        compare = Variant.create("Compare", project.id)
+        return f"variant_id={base.id}&compare_variant_id={compare.id}"
+
+
+def test_get_vulnerabilities_compare_base_none(client, empty_comparison):
     """GET with variant_id+compare_variant_id where base has no scan → base_ids=set() (line 88)."""
-    import uuid
-    base_id = str(uuid.uuid4())
-    compare_id = str(uuid.uuid4())
-    response = client.get(f"/api/vulnerabilities?variant_id={base_id}&compare_variant_id={compare_id}")
+    response = client.get(f"/api/vulnerabilities?{empty_comparison}")
     assert response.status_code == 200
     data = json.loads(response.data)
     assert isinstance(data, list)
 
 
-def test_get_vulnerabilities_compare_intersection_no_scan(client):
+def test_get_vulnerabilities_compare_intersection_no_scan(client, empty_comparison):
     """GET with operation=intersection and compare has no scan → records=[] (line 100)."""
-    import uuid
-    base_id = str(uuid.uuid4())
-    compare_id = str(uuid.uuid4())
-    response = client.get(
-        f"/api/vulnerabilities?variant_id={base_id}&compare_variant_id={compare_id}&operation=intersection"
-    )
+    response = client.get(f"/api/vulnerabilities?{empty_comparison}&operation=intersection")
     assert response.status_code == 200
     data = json.loads(response.data)
     assert data == []
 
 
-def test_get_vulnerabilities_compare_difference_no_scan(client):
+def test_get_vulnerabilities_compare_difference_no_scan(client, empty_comparison):
     """GET (default difference) compare has no scan → records=[] (line 118)."""
-    import uuid
-    base_id = str(uuid.uuid4())
-    compare_id = str(uuid.uuid4())
-    response = client.get(
-        f"/api/vulnerabilities?variant_id={base_id}&compare_variant_id={compare_id}&operation=difference"
-    )
+    response = client.get(f"/api/vulnerabilities?{empty_comparison}&operation=difference")
     assert response.status_code == 200
     data = json.loads(response.data)
     assert data == []
@@ -794,13 +792,54 @@ def test_get_vulnerabilities_compare_with_data(app, client):
 
         base_id = str(base_variant.id)
         compare_id = str(compare_variant.id)
+        package_id = pkg.string_id
 
     response = client.get(
         f"/api/vulnerabilities?variant_id={base_id}&compare_variant_id={compare_id}&operation=intersection"
     )
     assert response.status_code == 200
     data = json.loads(response.data)
-    assert any(v["id"] == "CVE-COMPARE-0001" for v in data)
+    vulnerability = next(v for v in data if v["id"] == "CVE-COMPARE-0001")
+    assert vulnerability["packages_current_by_variant"] == {
+        base_id: [package_id], compare_id: [package_id],
+    }
+
+
+@pytest.mark.parametrize("pair", [False, True])
+def test_vulnerability_comparison_validates_project_scope(app, client, pair):
+    import uuid
+    from src.models import Project, Variant
+
+    with app.app_context():
+        project = Project.create("ComparisonScope")
+        base = Variant.create("Base", project.id)
+        same_project = Variant.create("Selected", project.id)
+        other_project = Project.create("OtherComparisonScope")
+        other = Variant.create("Other", other_project.id)
+        project_id, other_project_id = str(project.id), str(other_project.id)
+        base_id, selected_id, other_id = str(base.id), str(same_project.id), str(other.id)
+
+    def comparison_query(second_id):
+        if pair:
+            return f"variant_id={base_id}&compare_variant_id={second_id}&operation=intersection"
+        return f"variant_ids={base_id},{second_id}&operation=union"
+
+    for second_id, project_param, status in [
+        (selected_id, project_id, 200),
+        (selected_id, other_project_id, 400),
+        (other_id, project_id, 400),
+        (other_id, None, 400),
+        (str(uuid.uuid4()), project_id, 404),
+    ]:
+        query = f"{comparison_query(second_id)}&include_outdated=true"
+        if project_param:
+            query += f"&project_id={project_param}"
+        assert client.get(f"/api/vulnerabilities?{query}").status_code == status
+        response = client.post(
+            f"/api/vulnerabilities/search-descriptions?{query}",
+            json={"vulnerability_ids": ["CVE-2020-35492"], "terms": ["sample"]},
+        )
+        assert response.status_code == status
 
 
 # ---------------------------------------------------------------------------

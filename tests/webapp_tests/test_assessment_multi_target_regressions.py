@@ -393,6 +393,27 @@ def test_to_dict_carries_the_exact_target_pairs(app):
     ]
 
 
+def test_batch_keeps_exact_target_pairs_when_another_pair_was_observed(app, client):
+    from src.models.observation import Observation
+
+    with app.app_context():
+        Observation.create(_finding_id(PKG_A), SCAN_B)
+
+    targets = [
+        {"variant_id": str(VARIANT_A), "package": PKG_A},
+        {"variant_id": str(VARIANT_B), "package": PKG_B},
+    ]
+    item = {"vuln_id": VULN_ID, "status": "fixed", "targets": targets}
+    invalid_item = {**item, "targets": [*targets, {"variant_id": str(VARIANT_A), "package": PKG_B}]}
+    response = client.post("/api/assessments/batch", json={"assessments": [item, invalid_item]})
+    assert response.status_code == 400
+
+    response = client.post("/api/assessments/batch", json={"assessments": [item]})
+    assert response.status_code == 200
+    [assessment] = response.get_json()["assessments"]
+    assert assessment["targets"] == targets
+
+
 def test_vulnerability_assessments_endpoint_carries_target_pairs(app, client):
     """This endpoint feeds the vuln modal's per-variant status matrix."""
     with app.app_context():

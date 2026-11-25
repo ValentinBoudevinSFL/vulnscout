@@ -295,8 +295,12 @@ SCHEMAS: dict[str, Any] = {
         "assessments": _array(_object({
             **_VEX_FIELDS, "vuln_id": _VULN_ID, "packages": _array(_PACKAGE_ID, minItems=1),
             "variant_id": _UUID, "variant_ids": _array(_UUID, minItems=1), "timestamp": _STRING,
-        }, ("vuln_id", "status", "packages"), anyOf=[
-            {"required": ["variant_id"]}, {"required": ["variant_ids"]},
+            "targets": _array(_object({
+                "variant_id": _UUID, "package": _PACKAGE_ID,
+            }, ("variant_id", "package")), minItems=1),
+        }, ("vuln_id", "status"), anyOf=[
+            {"required": ["targets"]}, {"required": ["packages", "variant_id"]},
+            {"required": ["packages", "variant_ids"]},
         ])),
     }, ("assessments",)),
     "AssessmentReconcile": _object({

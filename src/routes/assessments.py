@@ -1722,6 +1722,18 @@ def init_app(app: Flask) -> None:
                 errors.append({"error": "Invalid assessment data", "item": item})
                 continue
 
+            exact_targets: set[tuple[str, UUID]] | None = None
+            if "targets" in item:
+                exact_targets = _parse_batch_targets(item["targets"])
+                if not exact_targets:
+                    errors.append({"vuln_id": item.get("vuln_id"), "error": "Invalid assessment targets"})
+                    continue
+                item = {
+                    **item,
+                    "packages": sorted({package for package, _ in exact_targets}),
+                    "variant_ids": sorted({str(variant) for _, variant in exact_targets}),
+                }
+
             assessment, status = payload_to_assessment(item)
             if status != 200:
                 error = assessment.get("error", "Unknown error") if isinstance(assessment, dict) else "Internal error"
@@ -1788,6 +1800,10 @@ def init_app(app: Flask) -> None:
             except ValueError as exc:
                 errors.append({"vuln_id": vuln_id, "error": str(exc)})
                 continue
+            if exact_targets is not None:
+                missing_targets = exact_targets.difference(resolved)
+                unobserved = sorted(f"{package} in {variant}" for package, variant in missing_targets)
+                resolved = {pair: finding for pair, finding in resolved.items() if pair in exact_targets}
             if unobserved:
                 errors.append({
                     "vuln_id": vuln_id,
@@ -2049,6 +2065,23 @@ def init_app(app: Flask) -> None:
                 return {"error": "Not a pending AI assessment"}, 400
             session.delete(row)
         return {"status": "success", "deleted": [str(aid)]}, 200
+
+
+def _parse_batch_targets(raw_targets: object) -> set[tuple[str, UUID]] | None:
+    if not isinstance(raw_targets, list) or not raw_targets:
+        return None
+    targets: set[tuple[str, UUID]] = set()
+    for target in raw_targets:
+        if not isinstance(target, dict):
+            return None
+        package, variant = target.get("package"), target.get("variant_id")
+        if not isinstance(package, str) or not package or not isinstance(variant, str):
+            return None
+        variant_id, err = parse_uuid_or_400(variant, "variant_id")
+        if err is not None or variant_id is None:
+            return None
+        targets.add((package, variant_id))
+    return targets
 
 
 def payload_to_assessment(

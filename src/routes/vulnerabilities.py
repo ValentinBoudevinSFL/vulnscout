@@ -300,12 +300,47 @@ def _comparison_evidence_variants(
     return variant_ids[:1] if operation == "difference" else variant_ids
 
 
+def _comparison_variants(
+    raw_ids: list[tuple[str, str]], project_id: str | None,
+) -> tuple[list[uuid.UUID], ResponseReturnValue | None]:
+    variant_ids: list[uuid.UUID] = []
+    for label, value in raw_ids:
+        parsed, err = parse_uuid_or_400(value, label)
+        if err is not None:
+            return [], err
+        if parsed is None:
+            return [], ({"error": "Internal error"}, 500)
+        variant_ids.append(parsed)
+
+    project_ids: set[uuid.UUID] = set()
+    if project_id is not None:
+        parsed_project, err = parse_uuid_or_400(project_id, "project_id")
+        if err is not None:
+            return [], err
+        if parsed_project is not None:
+            project_ids.add(parsed_project)
+    if len(variant_ids) < 2:
+        return [], ({"error": "Select at least two variants for comparison"}, 400)
+    variants = db.session.scalars(db.select(Variant).where(Variant.id.in_(variant_ids))).all()
+    if len(variants) != len(set(variant_ids)):
+        return [], ({"error": "Comparison variant not found"}, 404)
+    project_ids.update(variant.project_id for variant in variants)
+    if len(project_ids) != 1:
+        return [], ({"error": "Comparison variants must belong to the same selected project"}, 400)
+    return variant_ids, None
+
+
 def _finding_packages_for_scans(
     scan_ids: list[uuid.UUID], vulnerability_ids: typing.Collection[str] | None = None,
     *, historical: bool = False,
 ) -> dict[str, dict[str, set[str]]]:
     if not scan_ids:
         return {}
+    sbom_variants = set(db.session.scalars(
+        db.select(Scan.variant_id).where(
+            Scan.id.in_(scan_ids), db.or_(Scan.scan_type != "tool", Scan.scan_type.is_(None))
+        ).distinct()
+    ))
     snapshot_rows = db.session.execute(
         db.select(
             Scan.id, Scan.variant_id, Scan.scan_type, Scan.timestamp,
@@ -342,6 +377,7 @@ def _finding_packages_for_scans(
     if vulnerability_ids is not None:
         query = query.where(Finding.vulnerability_id.in_(vulnerability_ids))
     targets: dict[str, dict[str, set[str]]] = {}
+    active_tool_scans: dict[uuid.UUID, set[uuid.UUID]] = {}
     for row in db.session.execute(query):
         vid, scan_id, variant_id, scan_type, timestamp, package_id, name, version, supplier = row
         target = f"{name}@{version}::{supplier}" if supplier else f"{name}@{version}"
@@ -353,10 +389,14 @@ def _finding_packages_for_scans(
                 # result. Older SBOMs can corroborate only the exact observed package.
                 first_seen = sbom_first_seen.get((variant_id, package_id))
                 if package_id not in documented and (first_seen is None or first_seen > timestamp):
-                    package_targets.clear()
+                    # Expanded results must still include current findings from tool-only variants.
+                    if variant_id not in sbom_variants and variant_id not in active_tool_scans:
+                        active_tool_scans[variant_id] = set(active_scan_ids_for_variant(variant_id))
+                    if scan_id not in active_tool_scans.get(variant_id, ()):
+                        package_targets.clear()
                 if not supplier:
                     package_targets.update(documented)
-            else:
+            elif variant_id in sbom_variants:
                 if not supplier:
                     package_targets.update(documented)
                 package_targets = {
@@ -569,6 +609,8 @@ def init_app(app: Flask) -> None:
         query include_outdated boolean optional Include vulnerabilities and status targets from superseded SBOMs.
         query format string optional Response format such as list or dict.
         response 200 VulnerabilityCollection Vulnerability collection; list/compact arrays or a map with format=dict.
+        response 400 Error Invalid query or variants outside the selected project.
+        response 404 Error A comparison variant does not exist.
         """
         response_format = request.args.get('format', 'list')
         variant_id = request.args.get('variant_id')
@@ -578,21 +620,18 @@ def init_app(app: Flask) -> None:
         include_outdated = request.args.get('include_outdated', '').lower() in ('1', 'true', 'yes')
         variant_scoped_overrides: dict[str, _ScopedOverrides] = {}
         current_scan_ids: list[uuid.UUID] = []
+        base_target_scan_ids: list[uuid.UUID] = []
         outdated_variant_ids: list[uuid.UUID] = []
         records: list[Vulnerability] = []
         _scope_variant: uuid.UUID | None = None
         _scope_project: uuid.UUID | None = None
         if variant_id and compare_variant_id:
-            base_uuid, err = parse_uuid_or_400(variant_id, "variant_id")
-            if err:
+            comparison_variants, err = _comparison_variants(
+                [("variant_id", variant_id), ("compare_variant_id", compare_variant_id)], project_id,
+            )
+            if err is not None:
                 return err
-            if base_uuid is None:
-                return {"error": "Internal error"}, 500
-            compare_uuid, err = parse_uuid_or_400(compare_variant_id, "compare_variant_id")
-            if err:
-                return err
-            if compare_uuid is None:
-                return {"error": "Internal error"}, 500
+            base_uuid, compare_uuid = comparison_variants
             base_latest_ids = active_scan_ids_for_variant(base_uuid)
             compare_latest_ids = active_scan_ids_for_variant(compare_uuid)
             current_scan_ids = compare_latest_ids
@@ -611,6 +650,7 @@ def init_app(app: Flask) -> None:
             base_ids = _vuln_ids_for_scans(base_latest_ids)
             operation = request.args.get('operation', 'difference')
             if operation == 'intersection':
+                base_target_scan_ids = base_latest_ids
                 if not compare_latest_ids:
                     records = []
                 else:
@@ -646,15 +686,11 @@ def init_app(app: Flask) -> None:
         elif variant_ids:
             # Multi-variant mode: union or intersection of the vulnerabilities
             # present in two or more selected variants.
-            raw_ids = [s.strip() for s in variant_ids.split(',') if s.strip()]
-            parsed_uuids: list[uuid.UUID] = []
-            for raw_id in raw_ids:
-                parsed, err = parse_uuid_or_400(raw_id, "variant_ids")
-                if err:
-                    return err
-                if parsed is None:
-                    return {"error": "Internal error"}, 500
-                parsed_uuids.append(parsed)
+            parsed_uuids, err = _comparison_variants(
+                [("variant_ids", s.strip()) for s in variant_ids.split(',') if s.strip()], project_id,
+            )
+            if err is not None:
+                return err
             operation = request.args.get('operation', 'union')
             _scope_variant = None
             _scope_project = None
@@ -1059,7 +1095,7 @@ def init_app(app: Flask) -> None:
                     scan_id for variant_key in outdated_variant_ids
                     for scan_id in active_scan_ids_for_variant(variant_key)
                 ]
-            current_targets = _finding_packages_for_scans(target_scan_ids, vuln_ids)
+            current_targets = _finding_packages_for_scans([*target_scan_ids, *base_target_scan_ids], vuln_ids)
             for vuln_id, vuln in vulns.items():
                 targets = current_targets.get(vuln_id, {})
                 vuln["packages_current_by_variant"] = {
@@ -1159,7 +1195,8 @@ def init_app(app: Flask) -> None:
         query include_outdated boolean optional Search descriptions from superseded SBOMs too.
         body DescriptionSearchRequest required Vulnerability ID and search-term arrays.
         response 200 DescriptionSearchResult Matching vulnerability IDs grouped by normalized term.
-        response 400 Error Invalid identifiers, arrays, or size limits.
+        response 400 Error Invalid input, size limits, or variants outside the selected project.
+        response 404 Error A comparison variant does not exist.
         """
         payload = request.get_json(silent=True)
         if not isinstance(payload, dict):
@@ -1199,14 +1236,9 @@ def init_app(app: Flask) -> None:
                 if variant_id and compare_variant_id else
                 [("variant_ids", value.strip()) for value in (variant_ids or "").split(",") if value.strip()]
             )
-            parsed_ids: list[uuid.UUID] = []
-            for label, value in raw_ids:
-                parsed, err = parse_uuid_or_400(value, label)
-                if err:
-                    return err
-                if parsed is None:
-                    return {"error": "Internal error"}, 500
-                parsed_ids.append(parsed)
+            parsed_ids, err = _comparison_variants(raw_ids, project_id)
+            if err is not None:
+                return err
             operation = request.args.get("operation", "difference" if pair else "union")
             scan_ids = _historical_scan_ids(
                 _comparison_evidence_variants(parsed_ids, operation, pair=pair),

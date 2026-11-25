@@ -361,6 +361,59 @@ describe('Vulnerability Table', () => {
         expect(vulnerabilityRequest?.searchParams.get('include_outdated')).toBe('true');
     });
 
+    test.each(['toggle', 'reset'])('%s to current rows drops historical bulk selections', async action => {
+        const current = vulnerabilities[0];
+        const historical = { ...vulnerabilities[1], id: 'CVE-HISTORICAL-ONLY' };
+        fetchMock.mockResponse(async request => JSON.stringify(
+            new URL(request.url).pathname === '/api/vulnerabilities' ? [current, historical] : [],
+        ));
+        render(<TableVulnerabilities
+            vulnerabilities={[current]}
+            variantId="variant-1"
+            appendAssessment={() => {}}
+            appendCVSS={() => null}
+            patchVuln={() => {}}
+        />);
+        const user = userEvent.setup();
+        await user.click(screen.getByRole('button', { name: 'Show Outdated', pressed: false }));
+        const historicalCell = await screen.findByRole('cell', { name: historical.id });
+        await user.keyboard('[ControlLeft>]');
+        await user.click(historicalCell);
+        await user.keyboard('[/ControlLeft]');
+        const bulkEstimate = screen.getByRole('button', { name: /change time estimate/i });
+        expect(bulkEstimate).toBeEnabled();
+
+        if (action === 'reset') {
+            await user.click(screen.getByRole('button', { name: /reset filters/i }));
+        } else {
+            await user.click(screen.getByRole('button', { name: 'Hide Outdated', pressed: true }));
+        }
+        expect(screen.queryByRole('cell', { name: historical.id })).not.toBeInTheDocument();
+        expect(bulkEstimate).toBeDisabled();
+    });
+
+    test('reset cancels a pending Outdated load', async () => {
+        let finishLoad: (response: string) => void = () => {};
+        fetchMock.mockResponse(request => new URL(request.url).pathname === '/api/vulnerabilities'
+            ? new Promise(resolve => { finishLoad = resolve; })
+            : Promise.resolve('[]'));
+        render(<TableVulnerabilities
+            vulnerabilities={[]}
+            variantId="variant-1"
+            appendAssessment={() => {}}
+            appendCVSS={() => null}
+            patchVuln={() => {}}
+        />);
+        const user = userEvent.setup();
+        await user.click(screen.getByRole('button', { name: 'Show Outdated', pressed: false }));
+        expect(screen.getByText('Loading outdated vulnerabilities…')).toBeInTheDocument();
+        await user.click(screen.getByRole('button', { name: /reset filters/i }));
+        finishLoad(JSON.stringify([vulnerabilities[0]]));
+        const outdated = screen.getByRole('button', { name: 'Show Outdated', pressed: false });
+        expect(outdated).toBeEnabled();
+        expect(screen.queryByRole('cell', { name: vulnerabilities[0].id })).not.toBeInTheDocument();
+    });
+
     test('saving effort from an Outdated row keeps the current row’s package scope', async () => {
         const current = {
             ...vulnerabilities[0], packages: ['scope-lib@2'], packages_current: ['scope-lib@2'],
@@ -1013,7 +1066,10 @@ describe('Vulnerability Table', () => {
         );
 
         // ARRANGE
-        render(<TableVulnerabilities vulnerabilities={vulnerabilities} appendAssessment={() => {}} appendCVSS={() => null} patchVuln={() => {}} />);
+        const rows = vulnerabilities.map(vuln => ({
+            ...vuln, packages_current_by_variant: { 'variant-1': vuln.packages_current },
+        }));
+        render(<TableVulnerabilities vulnerabilities={rows} appendAssessment={() => {}} appendCVSS={() => null} patchVuln={() => {}} />);
 
         const user = userEvent.setup();
         const select_all = await screen.getByTitle(/select all/i);
@@ -1052,9 +1108,9 @@ describe('Vulnerability Table', () => {
         await user.click(btn);
 
         // ASSERT
-        // 3 Variants.listByVuln calls (one per selected vulnerability) + 1 batch assessment API call
-        // (no GHSA progress poll: the test data contains no GHSA- vulnerabilities)
-        expect(fetchMock).toHaveBeenCalledTimes(4);
+        const [request] = fetchMock.mock.calls;
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        expect(JSON.parse(request[1]?.body as string).assessments).toHaveLength(rows.length);
     })
 
     test('select and change time estimate', async () => {

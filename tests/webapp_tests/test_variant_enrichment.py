@@ -275,7 +275,8 @@ class TestVariantScopedEnrichment:
         assert vuln_a is not None
         assert "beta" in vuln_a["variants"]
 
-    def test_packages_only_include_findings_from_active_scans(self, app, client, ids):
+    @pytest.mark.parametrize("include_outdated", ["false", "true"])
+    def test_packages_only_include_findings_from_active_scans(self, app, client, ids, include_outdated):
         from src.models.finding import Finding
         from src.models.observation import Observation
         from src.models.package import Package
@@ -301,12 +302,18 @@ class TestVariantScopedEnrichment:
                 id="CVE-2026-00001", description="version-scoping regression"
             )
             current_finding = Finding.get_or_create(current_package.id, vulnerability.id)
-            Finding.get_or_create(historical_package.id, vulnerability.id)
+            historical_finding = Finding.get_or_create(historical_package.id, vulnerability.id)
+            older_scan = Scan(
+                variant_id=variant.id, scan_type="tool", scan_source="nvd", timestamp=scan.timestamp - timedelta(days=1)
+            )
+            _db.session.add(older_scan)
+            _db.session.flush()
+            Observation.create(finding_id=historical_finding.id, scan_id=older_scan.id)
             Observation.create(finding_id=current_finding.id, scan_id=scan.id)
             _db.session.commit()
             variant_id = variant.id
 
-        resp = client.get(f"/api/vulnerabilities?variant_id={variant_id}")
+        resp = client.get(f"/api/vulnerabilities?variant_id={variant_id}&include_outdated={include_outdated}")
         assert resp.status_code == 200
         vulnerability_data = _vuln_by_id(json.loads(resp.data), "CVE-2026-00001")
         assert vulnerability_data is not None
@@ -315,6 +322,20 @@ class TestVariantScopedEnrichment:
         assert vulnerability_data["packages_current_by_variant"] == {
             str(variant_id): ["openssl@3.0.0"],
         }
+
+        with app.app_context():
+            _db.session.add(Scan(variant_id=variant_id, scan_type="sbom"))
+            _db.session.commit()
+
+        response = client.get(f"/api/vulnerabilities?variant_id={variant_id}&include_outdated={include_outdated}")
+        assert response.status_code == 200
+        after_empty_sbom = _vuln_by_id(response.get_json(), "CVE-2026-00001")
+        if include_outdated == "true":
+            assert after_empty_sbom is None
+        else:
+            assert after_empty_sbom is not None
+            assert after_empty_sbom["packages_current"] == []
+            assert after_empty_sbom["packages_current_by_variant"] == {}
 
 
 # ---------------------------------------------------------------------------

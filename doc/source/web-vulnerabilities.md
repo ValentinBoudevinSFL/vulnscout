@@ -1,6 +1,6 @@
 # Vulnerability Table
 
-Every vulnerability detected across imported SBOMs in your scope is listed here, and the toolbar across the top provides a rich set of controls to narrow down what you see and act on what matters. By default, the vulnerability pool is scoped to the **current scan result** — only vulnerabilities whose findings belong to packages present in the active SBOM are shown, ensuring that stale or cross-variant findings do not appear.
+The vulnerability table shows the **current scan results** in your scope by default. Current package targets are limited to the active SBOM of each variant when one exists. In a variant with only tool scans, exact findings from its active tool scans can still be current targets.
 
 ## Search
 
@@ -41,7 +41,7 @@ VulnScout provides several filter categories, each accessible from a dedicated d
   - **EPSS Range**: a percentage-based range slider that narrows the list to vulnerabilities whose Exploit Prediction Scoring System score falls within the specified band.
   - **Attack Vector**: checkboxes for Network, Adjacent, Local, and Physical, reflecting the CVSS attack-vector metric.
   - **First Scan Date**: multi-select by scan timestamp, useful for identifying which vulnerabilities appeared in a particular import run.
-- **Outdated**: a separate toolbar switch, off by default. When enabled, also includes vulnerabilities from superseded SBOM package versions and includes their package-target statuses in the Status column. Results and description search remain limited to the selected variant, project, or comparison scope. Enabling the filter does not make historical packages current edit targets.
+- **Outdated**: a separate toolbar switch, off by default. When enabled, also includes vulnerabilities from superseded SBOM package versions and includes their package-target statuses in the Status column. Results and description search remain limited to the selected variant, project, or comparison scope. Bulk status changes still require current package targets. Turning off Outdated removes historical-only rows from the selection.
 
 Active filter dropdowns show a small checkmark; the **Outdated** switch shows its own on/off state. **Reset Filters** clears everything back to defaults.
 

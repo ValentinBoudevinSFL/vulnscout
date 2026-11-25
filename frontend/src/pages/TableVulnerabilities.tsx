@@ -1526,9 +1526,20 @@ function TableVulnerabilities ({ vulnerabilities, filterLabel, filterValue, filt
 
     useEffect(() => () => descriptionSearchController.current?.abort(), []);
 
-    const selectedVulns = useMemo(() => {
-        return Object.entries(selectedRows).flatMap(([id, selected]) => selected ? [id] : [])
-    }, [selectedRows])
+    const activeVulnerabilityIds = useMemo(
+        () => new Set(tableVulnerabilities.map(vuln => vuln.id)), [tableVulnerabilities],
+    );
+    const selectedVulns = useMemo(
+        () => Object.keys(selectedRows).filter(id => selectedRows[id] && activeVulnerabilityIds.has(id)),
+        [selectedRows, activeVulnerabilityIds],
+    );
+    useEffect(() => {
+        setSelectedRows(previous => {
+            const entries = Object.entries(previous);
+            const retained = entries.filter(([id]) => activeVulnerabilityIds.has(id));
+            return retained.length === entries.length ? previous : Object.fromEntries(retained);
+        });
+    }, [activeVulnerabilityIds]);
 
     useEffect(() => {
         onAgentContextChange?.({
@@ -1556,6 +1567,7 @@ function TableVulnerabilities ({ vulnerabilities, filterLabel, filterValue, filt
     };
 
     function resetFilters() {
+        void toggleOutdated(false);
         descriptionSearchController.current?.abort();
         setSearch('');
         setDraftSearch('');
