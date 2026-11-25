@@ -863,6 +863,366 @@ def test_current_packages_per_variant_keeps_supplier_identity(app, client):
     assert "cairo@1.16.0::Other Supplier" not in vulnerability["packages_current"]
 
 
+def test_vulnerabilities_include_outdated_is_opt_in_and_scoped(app, client):
+    from datetime import datetime, timezone
+
+    from src.extensions import db
+    from src.models.finding import Finding
+    from src.models.observation import Observation
+    from src.models.package import Package
+    from src.models.project import Project
+    from src.models.sbom_document import SBOMDocument
+    from src.models.sbom_observation import SBOMObservation
+    from src.models.sbom_package import SBOMPackage
+    from src.models.scan import Scan
+    from src.models.variant import Variant
+    from src.models.vulnerability import Vulnerability
+
+    with app.app_context():
+        project = Project.create("OutdatedVulnerabilityProject")
+        variant = Variant.create("OutdatedVariant", project.id)
+        sibling = Variant.create("SiblingVariant", project.id)
+        old_package = Package.find_or_create("outdated-lib", "1.0", [], [], "")
+        current_package = Package.find_or_create("outdated-lib", "2.0", [], [], "")
+        sibling_package = Package.find_or_create("sibling-lib", "1.0", [], [], "")
+        original_supplier = Package.find_or_create("supplier-lib", "1.0", supplier="Original")
+        later_supplier = Package.find_or_create("supplier-lib", "1.0", supplier="Later")
+        supplierless_tool = Package.find_or_create("tool-lib", "1.0")
+        documented_tool = Package.find_or_create("tool-lib", "1.0", supplier="Documented")
+        later_tool = Package.find_or_create("tool-lib", "1.0", supplier="Later")
+        db.session.commit()
+
+        old_only = Vulnerability.create_record(
+            id="CVE-OUTDATED-ONLY-0001", description="Old package only", status="high",
+        )
+        shared = Vulnerability.create_record(
+            id="CVE-OUTDATED-SHARED-0001", description="Old and current package", status="high",
+        )
+        sibling_vulnerability = Vulnerability.create_record(
+            id="CVE-OUTDATED-SIBLING-0001", description="Sibling variant", status="high",
+        )
+        notes_only = Vulnerability.create_record(
+            id="CVE-OUTDATED-NOTES", description="Note without a package", status="high",
+        )
+        db.session.commit()
+
+        old_only_finding = Finding.get_or_create(old_package.id, old_only.id)
+        shared_old_finding = Finding.get_or_create(old_package.id, shared.id)
+        shared_current_finding = Finding.get_or_create(current_package.id, shared.id)
+        sibling_finding = Finding.get_or_create(sibling_package.id, sibling_vulnerability.id)
+        supplier_finding = Finding.get_or_create(original_supplier.id, old_only.id)
+        supplierless_finding = Finding.get_or_create(supplierless_tool.id, old_only.id)
+        notes_sibling_finding = Finding.get_or_create(sibling_package.id, notes_only.id)
+        db.session.commit()
+
+        old_scan = Scan(
+            variant_id=variant.id, scan_type="sbom",
+            timestamp=datetime(2024, 1, 1, tzinfo=timezone.utc),
+        )
+        current_scan = Scan(
+            variant_id=variant.id, scan_type="sbom",
+            timestamp=datetime(2024, 6, 1, tzinfo=timezone.utc),
+        )
+        sibling_scan = Scan(
+            variant_id=sibling.id, scan_type="sbom",
+            timestamp=datetime(2024, 6, 1, tzinfo=timezone.utc),
+        )
+        stale_tool_scan = Scan(
+            variant_id=variant.id, scan_type="tool", scan_source="osv",
+            timestamp=datetime(2024, 3, 1, tzinfo=timezone.utc),
+        )
+        db.session.add_all([old_scan, current_scan, sibling_scan, stale_tool_scan])
+        db.session.flush()
+        old_document = SBOMDocument(
+            path="/outdated/old.spdx.json", source_name="old.spdx.json",
+            format="spdx", scan_id=old_scan.id,
+        )
+        current_document = SBOMDocument(
+            path="/outdated/current.spdx.json", source_name="current.spdx.json",
+            format="spdx", scan_id=current_scan.id,
+        )
+        sibling_document = SBOMDocument(
+            path="/outdated/sibling.spdx.json", source_name="sibling.spdx.json",
+            format="spdx", scan_id=sibling_scan.id,
+        )
+        tool_document = SBOMDocument(
+            path="/outdated/tool.grype.json", source_name="tool.grype.json",
+            format="grype", scan_id=stale_tool_scan.id,
+        )
+        db.session.add_all([old_document, current_document, sibling_document, tool_document])
+        db.session.flush()
+        db.session.add_all([
+            SBOMPackage(sbom_document_id=old_document.id, package_id=old_package.id),
+            SBOMPackage(sbom_document_id=current_document.id, package_id=current_package.id),
+            SBOMPackage(sbom_document_id=old_document.id, package_id=original_supplier.id),
+            SBOMPackage(sbom_document_id=current_document.id, package_id=later_supplier.id),
+            SBOMPackage(sbom_document_id=tool_document.id, package_id=documented_tool.id),
+            SBOMPackage(sbom_document_id=current_document.id, package_id=later_tool.id),
+            SBOMPackage(sbom_document_id=sibling_document.id, package_id=sibling_package.id),
+            Observation(finding_id=old_only_finding.id, scan_id=old_scan.id),
+            Observation(finding_id=supplier_finding.id, scan_id=old_scan.id),
+            Observation(finding_id=supplierless_finding.id, scan_id=stale_tool_scan.id),
+            Observation(finding_id=shared_old_finding.id, scan_id=old_scan.id),
+            Observation(finding_id=shared_old_finding.id, scan_id=stale_tool_scan.id),
+            Observation(finding_id=shared_current_finding.id, scan_id=current_scan.id),
+            Observation(finding_id=sibling_finding.id, scan_id=sibling_scan.id),
+            Observation(finding_id=notes_sibling_finding.id, scan_id=sibling_scan.id),
+            SBOMObservation(
+                vulnerability_id=old_only.id,
+                sbom_document_id=old_document.id,
+                package_id=old_package.id,
+                key="description",
+                description="legacytoken found in the old SBOM",
+            ),
+            SBOMObservation(
+                vulnerability_id=old_only.id,
+                sbom_document_id=old_document.id,
+                package_id=original_supplier.id,
+                key="description",
+                description="Original supplier only",
+            ),
+            SBOMObservation(
+                vulnerability_id=notes_only.id,
+                sbom_document_id=old_document.id,
+                key="recommendation",
+                description="Scoped recommendation without an affected package",
+            ),
+        ])
+        db.session.commit()
+        variant_id = str(variant.id)
+        project_id = str(project.id)
+
+    current_response = client.get(f"/api/vulnerabilities?variant_id={variant_id}")
+    assert current_response.status_code == 200
+    current = {item["id"]: item for item in current_response.get_json()}
+    assert set(current) == {"CVE-OUTDATED-SHARED-0001"}
+
+    outdated_response = client.get(
+        f"/api/vulnerabilities?variant_id={variant_id}&include_outdated=true"
+    )
+    assert outdated_response.status_code == 200
+    outdated = {item["id"]: item for item in outdated_response.get_json()}
+    assert set(outdated) == {
+        "CVE-OUTDATED-ONLY-0001", "CVE-OUTDATED-SHARED-0001", "CVE-OUTDATED-NOTES",
+    }
+    assert outdated["CVE-OUTDATED-SHARED-0001"]["packages_current"] == [
+        "outdated-lib@2.0",
+    ]
+    for field in ("packages_current", "packages_current_by_variant"):
+        assert outdated["CVE-OUTDATED-SHARED-0001"][field] == current["CVE-OUTDATED-SHARED-0001"][field]
+    assert outdated["CVE-OUTDATED-SHARED-0001"]["packages_current_by_variant"] == {
+        variant_id: ["outdated-lib@2.0"],
+    }
+    assert outdated["CVE-OUTDATED-SHARED-0001"]["packages_status_by_variant"] == {
+        variant_id: ["outdated-lib@1.0", "outdated-lib@2.0"],
+    }
+    assert outdated["CVE-OUTDATED-ONLY-0001"]["packages_status_by_variant"] == {
+        variant_id: ["outdated-lib@1.0", "supplier-lib@1.0::Original", "tool-lib@1.0::Documented"],
+    }
+    assert outdated["CVE-OUTDATED-ONLY-0001"]["packages"] == [
+        "outdated-lib@1.0", "supplier-lib@1.0::Original", "tool-lib@1.0::Documented",
+    ]
+    assert outdated["CVE-OUTDATED-NOTES"]["packages"] == []
+    assert outdated["CVE-OUTDATED-NOTES"]["packages_status_by_variant"] == {}
+
+    search_payload = {
+        "vulnerability_ids": ["CVE-OUTDATED-ONLY-0001"],
+        "terms": ["legacytoken"],
+    }
+    active_search = client.post(
+        f"/api/vulnerabilities/search-descriptions?variant_id={variant_id}",
+        json=search_payload,
+    )
+    assert active_search.get_json()["matches"]["legacytoken"] == []
+    historical_search = client.post(
+        f"/api/vulnerabilities/search-descriptions?variant_id={variant_id}&include_outdated=true",
+        json=search_payload,
+    )
+    assert historical_search.get_json()["matches"]["legacytoken"] == [
+        "CVE-OUTDATED-ONLY-0001",
+    ]
+
+    project_response = client.get(
+        f"/api/vulnerabilities?project_id={project_id}&include_outdated=true"
+    )
+    assert project_response.status_code == 200
+    project_ids = {item["id"] for item in project_response.get_json()}
+    assert "CVE-OUTDATED-SIBLING-0001" in project_ids
+
+
+def test_outdated_comparison_recomputes_difference_union_and_intersection(app, client):
+    from datetime import datetime, timezone
+
+    from src.extensions import db
+    from src.models.finding import Finding
+    from src.models.observation import Observation
+    from src.models.package import Package
+    from src.models.project import Project
+    from src.models.sbom_document import SBOMDocument
+    from src.models.sbom_observation import SBOMObservation
+    from src.models.sbom_package import SBOMPackage
+    from src.models.scan import Scan
+    from src.models.variant import Variant
+    from src.models.vulnerability import Vulnerability
+
+    with app.app_context():
+        project = Project.create("OutdatedComparisonProject")
+        base = Variant.create("OutdatedBase", project.id)
+        compare = Variant.create("OutdatedCompare", project.id)
+        third = Variant.create("OutdatedThird", project.id)
+        sibling = Variant.create("OutdatedUnselected", project.id)
+
+        vulnerabilities = {
+            key: Vulnerability.create_record(
+                id=vuln_id, description=vuln_id, status="high",
+            )
+            for key, vuln_id in {
+                "shared": "CVE-OUTDATED-COMPARE-SHARED",
+                "compare": "CVE-OUTDATED-COMPARE-ONLY",
+                "base": "CVE-OUTDATED-BASE-ONLY",
+                "sibling": "CVE-OUTDATED-UNSELECTED",
+            }.items()
+        }
+        db.session.commit()
+
+        packages = {
+            key: Package.find_or_create(name, version, [], [], "")
+            for key, name, version in [
+                ("shared", "comparison-shared", "1.0"),
+                ("base_current", "base-current", "2.0"),
+                ("compare_only", "compare-only", "1.0"),
+                ("base_only", "base-only", "1.0"),
+                ("sibling_only", "sibling-only", "1.0"),
+            ]
+        }
+        db.session.commit()
+
+        scan_specs = [
+            ("base_old", base, datetime(2024, 1, 1, tzinfo=timezone.utc),
+             ["shared", "base_only"]),
+            ("base_current", base, datetime(2024, 6, 1, tzinfo=timezone.utc),
+             ["base_current"]),
+            ("compare_current", compare, datetime(2024, 6, 1, tzinfo=timezone.utc),
+             ["shared", "compare_only"]),
+            ("third_current", third, datetime(2024, 6, 1, tzinfo=timezone.utc),
+             ["shared"]),
+            ("sibling_current", sibling, datetime(2024, 6, 1, tzinfo=timezone.utc),
+             ["sibling_only"]),
+        ]
+        scans = {}
+        documents = {}
+        for key, variant, timestamp, _package_keys in scan_specs:
+            scan = Scan(
+                variant_id=variant.id, scan_type="sbom", timestamp=timestamp,
+            )
+            db.session.add(scan)
+            scans[key] = scan
+        db.session.flush()
+        for key, _variant, _timestamp, package_keys in scan_specs:
+            document = SBOMDocument(
+                path=f"/outdated-comparison/{key}.spdx.json",
+                source_name=f"{key}.spdx.json",
+                format="spdx",
+                scan_id=scans[key].id,
+            )
+            db.session.add(document)
+            documents[key] = document
+        db.session.flush()
+        for key, _variant, _timestamp, package_keys in scan_specs:
+            for package_key in package_keys:
+                db.session.add(SBOMPackage(
+                    sbom_document_id=documents[key].id,
+                    package_id=packages[package_key].id,
+                ))
+
+        observation_specs = [
+            ("base_old", "shared", "shared"),
+            ("base_old", "base_only", "base"),
+            ("compare_current", "shared", "shared"),
+            ("compare_current", "compare_only", "compare"),
+            ("third_current", "shared", "shared"),
+            ("sibling_current", "sibling_only", "sibling"),
+        ]
+        for scan_key, package_key, vulnerability_key in observation_specs:
+            finding = Finding.get_or_create(
+                packages[package_key].id, vulnerabilities[vulnerability_key].id,
+            )
+            db.session.add(Observation(
+                finding_id=finding.id, scan_id=scans[scan_key].id,
+            ))
+        db.session.add_all([
+            SBOMObservation(
+                vulnerability_id=vulnerabilities["shared"].id,
+                sbom_document_id=documents[scan_key].id,
+                key="description",
+                description=term,
+            )
+            for scan_key, term in [
+                ("base_old", "basehistoricalterm"), ("sibling_current", "unselectedterm"),
+            ]
+        ])
+        db.session.commit()
+        base_id, compare_id, third_id, project_id = map(
+            str, (base.id, compare.id, third.id, project.id),
+        )
+
+    pair_base = f"/api/vulnerabilities?variant_id={base_id}&compare_variant_id={compare_id}"
+    active_pair = client.get(pair_base)
+    assert {item["id"] for item in active_pair.get_json()} == {
+        "CVE-OUTDATED-COMPARE-SHARED", "CVE-OUTDATED-COMPARE-ONLY",
+    }
+
+    outdated_pair = client.get(f"{pair_base}&include_outdated=true")
+    assert {item["id"] for item in outdated_pair.get_json()} == {
+        "CVE-OUTDATED-COMPARE-ONLY",
+    }
+    outdated_pair_intersection = client.get(
+        f"{pair_base}&operation=intersection&include_outdated=true"
+    )
+    assert {item["id"] for item in outdated_pair_intersection.get_json()} == {
+        "CVE-OUTDATED-COMPARE-SHARED",
+    }
+
+    multi_base = f"/api/vulnerabilities?variant_ids={base_id},{compare_id},{third_id}"
+    multi_difference = client.get(
+        f"{multi_base}&operation=difference&include_outdated=true"
+    )
+    assert {item["id"] for item in multi_difference.get_json()} == {
+        "CVE-OUTDATED-BASE-ONLY",
+    }
+    multi_union = client.get(f"{multi_base}&operation=union&include_outdated=true")
+    assert {item["id"] for item in multi_union.get_json()} == {
+        "CVE-OUTDATED-COMPARE-SHARED",
+        "CVE-OUTDATED-COMPARE-ONLY",
+        "CVE-OUTDATED-BASE-ONLY",
+    }
+    multi_intersection = client.get(
+        f"{multi_base}&operation=intersection&include_outdated=true"
+    )
+    assert {item["id"] for item in multi_intersection.get_json()} == {
+        "CVE-OUTDATED-COMPARE-SHARED",
+    }
+
+    shared_id = "CVE-OUTDATED-COMPARE-SHARED"
+    for scope, expected in (
+        (f"variant_id={base_id}&compare_variant_id={compare_id}&operation=intersection", []),
+        (f"variant_ids={base_id},{compare_id},{third_id}&operation=union", []),
+        (f"project_id={project_id}", [shared_id]),
+    ):
+        result = client.post(
+            f"/api/vulnerabilities/search-descriptions?{scope}&include_outdated=true",
+            json={
+                "vulnerability_ids": [shared_id],
+                "terms": ["basehistoricalterm", "unselectedterm"],
+            },
+        )
+        assert result.status_code == 200
+        assert result.get_json()["matches"] == {
+            "basehistoricalterm": [shared_id],
+            "unselectedterm": expected,
+        }
+
+
 def test_get_vulnerability_by_id_with_variant_scope(app, client):
     """GET /api/vulnerabilities/<id>?variant_id=... applies scoped effort/CVSS."""
     from src.extensions import db

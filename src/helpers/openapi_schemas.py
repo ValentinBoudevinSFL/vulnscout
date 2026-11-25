@@ -187,6 +187,7 @@ SCHEMAS: dict[str, Any] = {
         "effort": _ref("Effort"), "advisories": _STRINGS,
         "packages": _PACKAGES, "packages_current": _PACKAGES,
         "packages_current_by_variant": _map(_PACKAGES),
+        "packages_status_by_variant": _map(_PACKAGES),
         "published": _TEXT, "data_fetched_at": _DATE, "data_updated_at": _DATE,
         "nvd_fetched_at": _DATE, "ghsa_fetched_at": _DATE, "euvd_fetched_at": _DATE,
         "first_scan_date": _DATE, "texts": _array(_ref("VulnerabilityText")),

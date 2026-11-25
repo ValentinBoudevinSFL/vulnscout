@@ -11,7 +11,7 @@ import userEvent from '@testing-library/user-event';
 import "@testing-library/jest-dom";
 import React from 'react';
 
-import Vulnerabilities, { type Vulnerability } from "../../src/handlers/vulnerabilities";
+import Vulnerabilities, { type Vulnerability, type VulnerabilityPatch } from "../../src/handlers/vulnerabilities";
 import TableVulnerabilities from '../../src/pages/TableVulnerabilities';
 import Iso8601Duration from '../../src/handlers/iso8601duration';
 import { __reset, __setEventSourceFactory } from '../../src/handlers/operationStore';
@@ -333,6 +333,83 @@ describe('Vulnerability Table', () => {
         expect(atk_vector_header).toBeInTheDocument();
         expect(source_header).toBeInTheDocument();
     })
+
+    test('Outdated filter starts off and requests scoped historical vulnerabilities when enabled', async () => {
+        fetchMock.mockResponse(JSON.stringify([]));
+        render(
+            <TableVulnerabilities
+                vulnerabilities={[]}
+                variantId="variant-1"
+                appendAssessment={() => {}}
+                appendCVSS={() => null}
+                patchVuln={() => {}}
+            />,
+        );
+        const user = userEvent.setup();
+        const outdatedSwitch = screen.getByRole('button', { name: 'Show Outdated', pressed: false });
+
+        const requestCountBeforeToggle = fetchMock.mock.calls.length;
+
+        await user.click(outdatedSwitch);
+        await screen.findByRole('button', { name: 'Hide Outdated', pressed: true });
+
+        expect(fetchMock.mock.calls.length).toBeGreaterThan(requestCountBeforeToggle);
+        const vulnerabilityRequest = fetchMock.mock.calls
+            .map(([url]) => new URL(url as string))
+            .find(url => url.pathname === '/api/vulnerabilities');
+        expect(vulnerabilityRequest?.searchParams.get('variant_id')).toBe('variant-1');
+        expect(vulnerabilityRequest?.searchParams.get('include_outdated')).toBe('true');
+    });
+
+    test('saving effort from an Outdated row keeps the current row’s package scope', async () => {
+        const current = {
+            ...vulnerabilities[0], packages: ['scope-lib@2'], packages_current: ['scope-lib@2'],
+            packages_current_by_variant: { 'variant-1': ['scope-lib@2'] },
+        };
+        fetchMock.mockResponse(async request => {
+            const url = new URL(request.url);
+            if (request.method === 'PATCH') {
+                return JSON.stringify({
+                    status: 'success', count: 1, vulnerabilities: [{ id: current.id, effort: { likely: 'PT6H' } }],
+                });
+            }
+            return JSON.stringify(url.pathname === '/api/vulnerabilities' ? [{
+                ...current, packages: ['scope-lib@1', 'scope-lib@2'],
+                packages_status_by_variant: { 'variant-1': ['scope-lib@1', 'scope-lib@2'] },
+            }] : []);
+        });
+        function ExplorerRows() {
+            const [rows, setRows] = React.useState<Vulnerability[]>([current]);
+            return <><output data-testid="current-packages">{rows[0].packages.join(', ')}</output><TableVulnerabilities
+                vulnerabilities={rows}
+                variantId="variant-1"
+                appendAssessment={() => {}}
+                appendCVSS={() => null}
+                patchVuln={(id: string, patch: VulnerabilityPatch) => setRows(prev => prev.map(row => {
+                    if (row.id !== id) return row;
+                    return typeof patch === 'function' ? patch(row) : patch;
+                }))}
+            /></>;
+        }
+
+        render(<ExplorerRows />);
+        const user = userEvent.setup();
+        await user.click(screen.getByRole('button', { name: 'Show Outdated', pressed: false }));
+        await screen.findByRole('cell', { name: 'scope-lib@1, scope-lib@2' });
+        await user.click(screen.getByTitle(/select all/i));
+        await user.click(screen.getByRole('button', { name: /change time estimate/i }));
+        await user.type(screen.getByPlaceholderText(/shortest estimate/i), '2h');
+        await user.type(screen.getByPlaceholderText(/balanced estimate/i), '6h');
+        await user.type(screen.getByPlaceholderText(/longest estimate/i), '8h');
+        await user.click(screen.getByText(/save estimation/i));
+        await screen.findByText(/successfully updated/i);
+        const outdated = screen.getByRole('button', { name: 'Hide Outdated', pressed: true });
+        await waitFor(() => expect(outdated).toBeEnabled());
+        await user.click(outdated);
+        expect(screen.getByRole('button', { name: 'Show Outdated', pressed: false })).toBeVisible();
+        expect(screen.getByRole('cell', { name: 'scope-lib@2' })).toBeInTheDocument();
+        expect(screen.getByTestId('current-packages')).toHaveTextContent(/^scope-lib@2$/);
+    });
 
     test('renders columns in a fixed canonical order regardless of saved toggle order', async () => {
         // ARRANGE - a scrambled visibleColumns order in local storage

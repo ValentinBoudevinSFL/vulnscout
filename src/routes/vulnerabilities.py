@@ -254,6 +254,119 @@ def _variant_ids_for_vulnerability(vulnerability_id: str) -> list[uuid.UUID | No
     return [variant_id for (variant_id,) in rows]
 
 
+def _historical_sbom_vulnerability_scope(
+    variant_ids: list[uuid.UUID],
+) -> tuple[
+    set[str], dict[str, dict[str, set[str]]],
+    dict[str, set[uuid.UUID]], list[uuid.UUID],
+]:
+    """Return vulnerabilities and package targets observed in any scoped SBOM."""
+    if not variant_ids:
+        return set(), {}, {}, []
+
+    scan_ids = _historical_scan_ids(variant_ids)
+    packages_by_vulnerability = _finding_packages_for_scans(scan_ids, historical=True)
+    variants_by_vulnerability: dict[str, set[uuid.UUID]] = {}
+    for vulnerability_id, packages_by_variant in packages_by_vulnerability.items():
+        variants_by_vulnerability[vulnerability_id] = {uuid.UUID(key) for key in packages_by_variant}
+
+    sbom_observation_rows = db.session.execute(
+        db.select(SBOMObservation.vulnerability_id, Scan.variant_id, Package)
+        .select_from(SBOMObservation)
+        .join(SBOMDocument, SBOMDocument.id == SBOMObservation.sbom_document_id)
+        .join(Scan, Scan.id == SBOMDocument.scan_id)
+        .outerjoin(Package, Package.id == SBOMObservation.package_id)
+        .where(Scan.variant_id.in_(variant_ids))
+    ).all()
+    for vulnerability_id, variant_id, package in sbom_observation_rows:
+        variants_by_vulnerability.setdefault(vulnerability_id, set()).add(variant_id)
+        if package is not None:
+            packages_by_vulnerability.setdefault(vulnerability_id, {}).setdefault(
+                str(variant_id), set()
+            ).add(package.string_id)
+
+    return set(variants_by_vulnerability), packages_by_vulnerability, variants_by_vulnerability, scan_ids
+
+
+def _historical_scan_ids(variant_ids: list[uuid.UUID]) -> list[uuid.UUID]:
+    return list(db.session.scalars(db.select(Scan.id).where(Scan.variant_id.in_(variant_ids))))
+
+
+def _comparison_evidence_variants(
+    variant_ids: list[uuid.UUID], operation: str, *, pair: bool,
+) -> list[uuid.UUID]:
+    if pair:
+        return variant_ids if operation == "intersection" else variant_ids[1:]
+    return variant_ids[:1] if operation == "difference" else variant_ids
+
+
+def _finding_packages_for_scans(
+    scan_ids: list[uuid.UUID], vulnerability_ids: typing.Collection[str] | None = None,
+    *, historical: bool = False,
+) -> dict[str, dict[str, set[str]]]:
+    if not scan_ids:
+        return {}
+    snapshot_rows = db.session.execute(
+        db.select(
+            Scan.id, Scan.variant_id, Scan.scan_type, Scan.timestamp,
+            Package.id, Package.name, Package.version, Package.supplier,
+        )
+        .select_from(Scan)
+        .join(SBOMDocument, SBOMDocument.scan_id == Scan.id)
+        .join(SBOMPackage, SBOMPackage.sbom_document_id == SBOMDocument.id)
+        .join(Package, Package.id == SBOMPackage.package_id)
+        .where(Scan.id.in_(scan_ids))
+        .distinct()
+    ).all()
+    sbom_first_seen: dict[tuple[uuid.UUID, uuid.UUID], datetime.datetime] = {}
+    documented_packages: dict[tuple[uuid.UUID, str, str], dict[uuid.UUID, str]] = {}
+    for scan_id, variant_id, scan_type, timestamp, package_id, name, version, supplier in snapshot_rows:
+        if scan_type != "tool":
+            key = (variant_id, package_id)
+            sbom_first_seen[key] = min(timestamp, sbom_first_seen.get(key, timestamp))
+        else:
+            target = f"{name}@{version}::{supplier}" if supplier else f"{name}@{version}"
+            documented_packages.setdefault((scan_id, name, version), {})[package_id] = target
+
+    query = (
+        db.select(
+            Finding.vulnerability_id, Scan.id, Scan.variant_id, Scan.scan_type, Scan.timestamp,
+            Package.id, Package.name, Package.version, Package.supplier,
+        )
+        .select_from(Finding)
+        .join(Observation, Observation.finding_id == Finding.id)
+        .join(Scan, Scan.id == Observation.scan_id)
+        .join(Package, Package.id == Finding.package_id)
+        .where(Observation.scan_id.in_(scan_ids))
+    )
+    if vulnerability_ids is not None:
+        query = query.where(Finding.vulnerability_id.in_(vulnerability_ids))
+    targets: dict[str, dict[str, set[str]]] = {}
+    for row in db.session.execute(query):
+        vid, scan_id, variant_id, scan_type, timestamp, package_id, name, version, supplier = row
+        target = f"{name}@{version}::{supplier}" if supplier else f"{name}@{version}"
+        package_targets = {package_id: target}
+        if scan_type == "tool":
+            documented = documented_packages.get((scan_id, name, version), {})
+            if historical:
+                # Tool scans need positive same-scan evidence to expand a supplierless
+                # result. Older SBOMs can corroborate only the exact observed package.
+                first_seen = sbom_first_seen.get((variant_id, package_id))
+                if package_id not in documented and (first_seen is None or first_seen > timestamp):
+                    package_targets.clear()
+                if not supplier:
+                    package_targets.update(documented)
+            else:
+                if not supplier:
+                    package_targets.update(documented)
+                package_targets = {
+                    pid: value for pid, value in package_targets.items() if (variant_id, pid) in sbom_first_seen
+                }
+        if package_targets:
+            targets.setdefault(vid, {}).setdefault(str(variant_id), set()).update(package_targets.values())
+    return targets
+
+
 def _populate_found_by(
     records: list[Vulnerability],
     variant_uuid: uuid.UUID | None = None,
@@ -453,6 +566,7 @@ def init_app(app: Flask) -> None:
         query compare_variant_id uuid optional Compare against a second variant.
         query variant_ids string optional Comma-separated list of variant IDs.
         query operation string optional Comparison mode such as difference, intersection, or union.
+        query include_outdated boolean optional Include vulnerabilities and status targets from superseded SBOMs.
         query format string optional Response format such as list or dict.
         response 200 VulnerabilityCollection Vulnerability collection; list/compact arrays or a map with format=dict.
         """
@@ -461,13 +575,11 @@ def init_app(app: Flask) -> None:
         project_id = request.args.get('project_id')
         compare_variant_id = request.args.get('compare_variant_id')
         variant_ids = request.args.get('variant_ids')
+        include_outdated = request.args.get('include_outdated', '').lower() in ('1', 'true', 'yes')
         variant_scoped_overrides: dict[str, _ScopedOverrides] = {}
         current_scan_ids: list[uuid.UUID] = []
+        outdated_variant_ids: list[uuid.UUID] = []
         records: list[Vulnerability] = []
-        # Set when ``record.packages`` was pre-populated from the same active
-        # scans that ``packages_current`` is derived from, which makes the two
-        # lists equal and lets the second query be skipped.
-        packages_match_current_scans = False
         _scope_variant: uuid.UUID | None = None
         _scope_project: uuid.UUID | None = None
         if variant_id and compare_variant_id:
@@ -486,6 +598,9 @@ def init_app(app: Flask) -> None:
             current_scan_ids = compare_latest_ids
             _scope_variant = compare_uuid
             _scope_project = None
+            outdated_variant_ids = _comparison_evidence_variants(
+                [base_uuid, compare_uuid], request.args.get('operation', 'difference'), pair=True,
+            )
             opts = (
                 selectinload(Vulnerability.findings).selectinload(Finding.package),
                 selectinload(Vulnerability.findings).selectinload(Finding.time_estimates),
@@ -543,6 +658,7 @@ def init_app(app: Flask) -> None:
             operation = request.args.get('operation', 'union')
             _scope_variant = None
             _scope_project = None
+            outdated_variant_ids = parsed_uuids
             opts = (
                 selectinload(Vulnerability.findings).selectinload(Finding.package),
                 selectinload(Vulnerability.findings).selectinload(Finding.time_estimates),
@@ -561,6 +677,10 @@ def init_app(app: Flask) -> None:
                 result_ids: list = []
             elif operation == 'intersection':
                 result_ids = list(set.intersection(*id_sets))
+            elif operation == 'difference':
+                result_ids = list(id_sets[0].difference(
+                    set[str]().union(*id_sets[1:])
+                ))
             else:  # union (default)
                 result_ids = list(set.union(*id_sets))
             records = list(db.session.execute(
@@ -577,6 +697,7 @@ def init_app(app: Flask) -> None:
                 return {"error": "Internal error"}, 500
             _scope_variant = variant_uuid
             _scope_project = None
+            outdated_variant_ids = [variant_uuid]
             latest_ids = active_scan_ids_for_variant(variant_uuid)
             current_scan_ids = latest_ids
             if not latest_ids:
@@ -640,7 +761,6 @@ def init_app(app: Flask) -> None:
                         _pkgs_by_vuln_var.setdefault(_key, []).append(_sid)
                     for r in records:
                         r.packages = _pkgs_by_vuln_var.get(str(r.id), [])
-                    packages_match_current_scans = True
                 variant_scoped_overrides = _variant_scoped_metrics_and_effort_overrides(records, variant_uuid)
         elif project_id:
             project_uuid, err = parse_uuid_or_400(project_id, "project_id")
@@ -650,6 +770,9 @@ def init_app(app: Flask) -> None:
                 return {"error": "Internal error"}, 500
             _scope_variant = None
             _scope_project = project_uuid
+            outdated_variant_ids = [
+                variant.id for variant in Variant.get_by_project(project_uuid)
+            ]
             latest_ids = active_scan_ids_for_project(project_uuid)
             current_scan_ids = latest_ids
             if not latest_ids:
@@ -804,14 +927,114 @@ def init_app(app: Flask) -> None:
                     # Mark findings and metrics as loaded to prevent lazy-load
                     orm_attrs.set_committed_value(r, 'findings', [])
                     orm_attrs.set_committed_value(r, 'metrics', metrics_by_vuln.get(r.id, []))
-                packages_match_current_scans = True
 
         else:
             records = Vulnerability.get_all()
             _scope_variant = None
             _scope_project = None
-        _populate_found_by(records, _scope_variant, _scope_project,
-                           active_scan_ids=current_scan_ids or None)
+            outdated_variant_ids = list(db.session.scalars(db.select(Variant.id)).all())
+
+        historical_packages_by_vulnerability: dict[str, dict[str, set[str]]] = {}
+        historical_variants_by_vulnerability: dict[str, set[uuid.UUID]] = {}
+        historical_scan_ids: list[uuid.UUID] = []
+        if include_outdated and outdated_variant_ids:
+            (
+                historical_vuln_ids,
+                historical_packages_by_vulnerability,
+                historical_variants_by_vulnerability,
+                historical_scan_ids,
+            ) = _historical_sbom_vulnerability_scope(outdated_variant_ids)
+            if variant_id and compare_variant_id:
+                base_uuid = uuid.UUID(variant_id)
+                compare_uuid = uuid.UUID(compare_variant_id)
+                operation = request.args.get('operation', 'difference')
+                if operation == 'intersection':
+                    historical_vuln_ids = {
+                        vuln_id for vuln_id in historical_vuln_ids
+                        if {base_uuid, compare_uuid}.issubset(
+                            historical_variants_by_vulnerability.get(vuln_id, set())
+                        )
+                    }
+                else:
+                    base_ids, _, _, _ = _historical_sbom_vulnerability_scope([base_uuid])
+                    historical_vuln_ids = {
+                        vuln_id for vuln_id in historical_vuln_ids
+                        if compare_uuid in historical_variants_by_vulnerability.get(vuln_id, set())
+                        and vuln_id not in base_ids
+                    }
+                historical_packages_by_vulnerability = {
+                    vuln_id: {
+                        variant_key: package_ids
+                        for variant_key, package_ids in packages_by_variant.items()
+                        if variant_key in {str(variant_uuid) for variant_uuid in outdated_variant_ids}
+                    }
+                    for vuln_id, packages_by_variant in historical_packages_by_vulnerability.items()
+                    if vuln_id in historical_vuln_ids
+                }
+            elif variant_ids:
+                operation = request.args.get('operation', 'union')
+                selected_sets = [
+                    {vuln_id for vuln_id in historical_vuln_ids
+                     if variant_uuid in historical_variants_by_vulnerability.get(vuln_id, set())}
+                    for variant_uuid in outdated_variant_ids
+                ]
+                if selected_sets and operation == 'intersection':
+                    historical_vuln_ids = selected_sets[0].intersection(*selected_sets[1:])
+                elif selected_sets and operation == 'difference':
+                    historical_vuln_ids = selected_sets[0].difference(
+                        set[str]().union(*selected_sets[1:])
+                    )
+                    historical_scan_ids = _historical_scan_ids(
+                        _comparison_evidence_variants(outdated_variant_ids, operation, pair=False),
+                    )
+                historical_packages_by_vulnerability = {
+                    vuln_id: packages_by_variant
+                    for vuln_id, packages_by_variant in historical_packages_by_vulnerability.items()
+                    if vuln_id in historical_vuln_ids
+                }
+            existing_ids = {record.id for record in records}
+            additional_ids = historical_vuln_ids - existing_ids
+            if additional_ids:
+                historical_records = list(db.session.execute(
+                    select(Vulnerability)
+                    .options(
+                        selectinload(Vulnerability.findings).selectinload(Finding.package),
+                        selectinload(Vulnerability.findings).selectinload(Finding.time_estimates),
+                        selectinload(Vulnerability.metrics),
+                        joinedload(Vulnerability.refresh),
+                    )
+                    .where(Vulnerability.id.in_(additional_ids))
+                    .order_by(Vulnerability.id)
+                ).scalars().all())
+                records.extend(historical_records)
+                if variant_id and compare_variant_id:
+                    override_variant_ids = [uuid.UUID(compare_variant_id)]
+                elif variant_ids and request.args.get('operation', 'union') == 'difference':
+                    override_variant_ids = outdated_variant_ids[:1]
+                else:
+                    override_variant_ids = outdated_variant_ids
+                if override_variant_ids:
+                    variant_scoped_overrides.update(
+                        _scoped_metrics_and_effort_overrides(
+                            historical_records, override_variant_ids
+                        )
+                    )
+
+            records_by_id = {record.id: record for record in records}
+            records = [
+                records_by_id[vulnerability_id]
+                for vulnerability_id in sorted(historical_vuln_ids)
+                if vulnerability_id in records_by_id
+            ]
+            if variant_ids and request.args.get('operation', 'union') == 'difference':
+                variant_scoped_overrides = _scoped_metrics_and_effort_overrides(
+                    records, outdated_variant_ids[:1]
+                )
+
+        _populate_found_by(
+            records, _scope_variant, _scope_project,
+            active_scan_ids=historical_scan_ids if include_outdated else current_scan_ids or None,
+        )
         vulns = {r.id: r.to_dict() for r in records}
         # The frontend consumes the richer ``texts`` field and never reads the
         # legacy top-level description.  Omitting this duplicate from the list
@@ -819,117 +1042,38 @@ def init_app(app: Flask) -> None:
         # the single-vulnerability endpoint still returns the complete record.
         for vuln in vulns.values():
             vuln.pop("description", None)
+            if include_outdated:
+                status_packages = historical_packages_by_vulnerability.get(vuln["id"], {})
+                vuln["packages"] = sorted(set().union(*status_packages.values()))
+                vuln["packages_status_by_variant"] = {
+                    variant_id: sorted(package_ids)
+                    for variant_id, package_ids in status_packages.items()
+                }
         _apply_variant_scoped_overrides_to_vuln_dicts(vulns, variant_scoped_overrides)
         vuln_ids = vulns.keys()
 
         if vulns:
-            # packages_current: packages from the specific scan(s), expanded to include all
-            # same-name+version supplier variants present in the active SBOM scans.
-            # This ensures that Grype-linked packages (no supplier) also surface SBOM packages.
-            if current_scan_ids and packages_match_current_scans:
-                for v in vulns.values():
-                    v["packages_current"] = sorted(v["packages"])
-            elif current_scan_ids:
-                _PkgVariant2 = aliased(Package)
-                pkg_rows = db.session.execute(
-                    db.select(Finding.vulnerability_id, _PkgVariant2.name, _PkgVariant2.version, _PkgVariant2.supplier)
-                    .join(Observation, Finding.id == Observation.finding_id)
-                    .join(Package, Finding.package_id == Package.id)
-                    .join(_PkgVariant2, (_PkgVariant2.name == Package.name) & (_PkgVariant2.version == Package.version))
-                    .outerjoin(SBOMPackage, SBOMPackage.package_id == _PkgVariant2.id)
-                    .outerjoin(SBOMDocument, SBOMDocument.id == SBOMPackage.sbom_document_id)
-                    .where(Observation.scan_id.in_(current_scan_ids))
-                    .where(Finding.vulnerability_id.in_(vuln_ids))
-                    .where(db.or_(
-                        SBOMDocument.scan_id.in_(current_scan_ids),
-                        _PkgVariant2.id == Package.id,
-                    ))
-                    .distinct()
-                ).all()
-                pkgs_current_by_vuln: dict = {}
-                for vuln_id, pkg_name, pkg_version, pkg_sup in pkg_rows:
-                    sid = f"{pkg_name}@{pkg_version}::{pkg_sup}" if pkg_sup else f"{pkg_name}@{pkg_version}"
-                    pkgs_current_by_vuln.setdefault(str(vuln_id), []).append(sid)
-                for v in vulns.values():
-                    v["packages_current"] = sorted(pkgs_current_by_vuln.get(v["id"], []))
-
-            if current_scan_ids:
-                # Preserve the variant dimension as well. A flattened package
-                # union cannot determine whether one exact assessment target
-                # is current in its own variant.
-                _PkgVariant3 = aliased(Package)
-                _sbom_scan = aliased(Scan)
-                scoped_pkg_rows = db.session.execute(
-                    db.select(
-                        Finding.vulnerability_id,
-                        Scan.variant_id,
-                        _PkgVariant3.name,
-                        _PkgVariant3.version,
-                        _PkgVariant3.supplier,
-                    )
-                    .select_from(Observation)
-                    .join(Scan, Scan.id == Observation.scan_id)
-                    .join(Finding, Finding.id == Observation.finding_id)
-                    .join(Package, Package.id == Finding.package_id)
-                    .join(_PkgVariant3, (
-                        (_PkgVariant3.name == Package.name)
-                        & (_PkgVariant3.version == Package.version)
-                    ))
-                    .outerjoin(SBOMPackage, SBOMPackage.package_id == _PkgVariant3.id)
-                    .outerjoin(SBOMDocument, SBOMDocument.id == SBOMPackage.sbom_document_id)
-                    .outerjoin(_sbom_scan, _sbom_scan.id == SBOMDocument.scan_id)
-                    .where(Observation.scan_id.in_(current_scan_ids))
-                    .where(db.or_(
-                        _PkgVariant3.id == Package.id,
-                        (
-                            SBOMDocument.scan_id.in_(current_scan_ids)
-                            & (_sbom_scan.variant_id == Scan.variant_id)
-                        ),
-                    ))
-                    .distinct()
-                ).all()
-                current_by_vuln_variant: dict[str, dict[str, list[str]]] = {}
-                for vuln_id, variant_id, pkg_name, pkg_version, pkg_supplier in scoped_pkg_rows:
-                    vuln_key = str(vuln_id)
-                    package_id = (
-                        f"{pkg_name}@{pkg_version}::{pkg_supplier}"
-                        if pkg_supplier else f"{pkg_name}@{pkg_version}"
-                    )
-                    current_by_vuln_variant.setdefault(vuln_key, {}).setdefault(
-                        str(variant_id), []).append(package_id)
-                for vuln in vulns.values():
-                    vuln["packages_current_by_variant"] = {
-                        variant_id: sorted(set(packages))
-                        for variant_id, packages in current_by_vuln_variant.get(
-                            vuln["id"], {}).items()
-                    }
-            else:
-                for v in vulns.values():
-                    v["packages_current"] = list(v["packages"])
+            target_scan_ids = current_scan_ids
+            if not (variant_id or project_id or variant_ids):
+                target_scan_ids = [
+                    scan_id for variant_key in outdated_variant_ids
+                    for scan_id in active_scan_ids_for_variant(variant_key)
+                ]
+            current_targets = _finding_packages_for_scans(target_scan_ids, vuln_ids)
+            for vuln_id, vuln in vulns.items():
+                targets = current_targets.get(vuln_id, {})
+                vuln["packages_current_by_variant"] = {
+                    variant_key: sorted(packages) for variant_key, packages in targets.items()
+                }
+                vuln["packages_current"] = sorted(set().union(*targets.values()))
 
             # Enrich each vuln dict with sorted variant names, restricted to
             # the active scans (latest SBOM + latest per-source tool scans)
             # so that the result is consistent with the vulnerabilities shown.
-            if current_scan_ids:
-                # Re-use the same scan IDs that were used to load vulns
-                active_scan_ids = current_scan_ids
+            if include_outdated:
+                active_scan_ids = historical_scan_ids
             else:
-                # Fallback (no variant/project scope): compute active scans
-                # for every variant using the same multi-source logic.
-                if _scope_variant is not None:
-                    active_scan_ids = active_scan_ids_for_variant(_scope_variant)
-                elif _scope_project is not None:
-                    active_scan_ids = active_scan_ids_for_project(_scope_project)
-                else:
-                    # All variants across all projects
-                    all_variant_ids: list[uuid.UUID] = [
-                        vid for (vid,) in db.session.execute(
-                            db.select(Variant.id)
-                        ).all()
-                    ]
-                    active_scan_ids = []
-                    for variant_uuid_item in all_variant_ids:
-                        active_scan_ids.extend(active_scan_ids_for_variant(variant_uuid_item))
+                active_scan_ids = target_scan_ids
             if active_scan_ids:
                 rows = db.session.execute(
                     db.select(Finding.vulnerability_id, Variant.name)
@@ -970,7 +1114,7 @@ def init_app(app: Flask) -> None:
                 all_vuln_texts = fetch_vulnerabilities_texts(
                     vuln_ids,
                     include_packages=True,
-                    scan_ids=active_scan_ids,
+                    scan_ids=historical_scan_ids if include_outdated else active_scan_ids,
                 )
                 for vuln_id, vuln_texts in all_vuln_texts.items():
                     vuln = vulns[vuln_id]
@@ -1007,8 +1151,12 @@ def init_app(app: Flask) -> None:
         """Return vulnerability IDs whose scoped descriptions contain each term.
 
         OpenAPI:
-        query variant_id uuid optional Restrict descriptions to a variant's active scans.
-        query project_id uuid optional Restrict descriptions to a project's active scans.
+        query variant_id uuid optional Restrict descriptions to a variant's scans.
+        query project_id uuid optional Restrict descriptions to a project's scans.
+        query compare_variant_id uuid optional Select the second variant in a historical comparison.
+        query variant_ids string optional Comma-separated variants in a historical comparison.
+        query operation string optional Select the historical comparison operation.
+        query include_outdated boolean optional Search descriptions from superseded SBOMs too.
         body DescriptionSearchRequest required Vulnerability ID and search-term arrays.
         response 200 DescriptionSearchResult Matching vulnerability IDs grouped by normalized term.
         response 400 Error Invalid identifiers, arrays, or size limits.
@@ -1041,20 +1189,50 @@ def init_app(app: Flask) -> None:
         scan_ids: list[uuid.UUID] | None = None
         variant_id = request.args.get("variant_id")
         project_id = request.args.get("project_id")
-        if variant_id:
+        compare_variant_id = request.args.get("compare_variant_id")
+        variant_ids = request.args.get("variant_ids")
+        include_outdated = request.args.get("include_outdated", "").lower() in ("1", "true", "yes")
+        pair = bool(variant_id and compare_variant_id)
+        if include_outdated and (pair or variant_ids):
+            raw_ids = (
+                [("variant_id", variant_id), ("compare_variant_id", compare_variant_id)]
+                if variant_id and compare_variant_id else
+                [("variant_ids", value.strip()) for value in (variant_ids or "").split(",") if value.strip()]
+            )
+            parsed_ids: list[uuid.UUID] = []
+            for label, value in raw_ids:
+                parsed, err = parse_uuid_or_400(value, label)
+                if err:
+                    return err
+                if parsed is None:
+                    return {"error": "Internal error"}, 500
+                parsed_ids.append(parsed)
+            operation = request.args.get("operation", "difference" if pair else "union")
+            scan_ids = _historical_scan_ids(
+                _comparison_evidence_variants(parsed_ids, operation, pair=pair),
+            )
+        elif variant_id:
             variant_uuid, err = parse_uuid_or_400(variant_id, "variant_id")
             if err:
                 return err
             if variant_uuid is None:
                 return {"error": "Internal error"}, 500
-            scan_ids = active_scan_ids_for_variant(variant_uuid)
+            scan_ids = (
+                _historical_scan_ids([variant_uuid])
+                if include_outdated
+                else active_scan_ids_for_variant(variant_uuid)
+            )
         elif project_id:
             project_uuid, err = parse_uuid_or_400(project_id, "project_id")
             if err:
                 return err
             if project_uuid is None:
                 return {"error": "Internal error"}, 500
-            scan_ids = active_scan_ids_for_project(project_uuid)
+            scan_ids = (
+                _historical_scan_ids([variant.id for variant in Variant.get_by_project(project_uuid)])
+                if include_outdated
+                else active_scan_ids_for_project(project_uuid)
+            )
 
         description_rows = db.session.execute(
             db.select(Vulnerability.id, Vulnerability.description)

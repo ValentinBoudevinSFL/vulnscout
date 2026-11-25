@@ -29,6 +29,7 @@ jest.mock('ae-cvss-calculator', () => {
 
 import Vulnerabilities, {
   buildStatusSummary,
+  patchAssessments,
   getTopStatusSummaryLabel,
   isVulnerabilityActive,
   getStatusSortIndex,
@@ -81,6 +82,26 @@ describe('Vulnerabilities parsing CVSS branches', () => {
     expect(calledUrl.searchParams.get('format')).toBe('compact');
   });
 
+  test('list opts into outdated vulnerabilities without changing the default query', async () => {
+    fetchMock.mockResponseOnce(JSON.stringify([rawVuln({
+      packages_status_by_variant: { 'variant-1': ['pkg@1.0.0', 'pkg@2.0.0'] },
+    })]));
+    const [vuln] = await Vulnerabilities.list(
+      'variant-1', undefined, undefined, undefined, undefined, undefined, undefined, true,
+    );
+    const calledUrl = new URL(fetchMock.mock.calls[0][0] as string);
+    expect(calledUrl.searchParams.get('include_outdated')).toBe('true');
+    expect(vuln.packages_status_by_variant).toEqual({
+      'variant-1': ['pkg@1.0.0', 'pkg@2.0.0'],
+    });
+
+    fetchMock.resetMocks();
+    fetchMock.mockResponseOnce(JSON.stringify([rawVuln()]));
+    await Vulnerabilities.list('variant-1');
+    const defaultUrl = new URL(fetchMock.mock.calls[0][0] as string);
+    expect(defaultUrl.searchParams.has('include_outdated')).toBe(false);
+  });
+
   test('parses compact records and preserves explicit attack vectors', async () => {
     fetchMock.mockResponseOnce(JSON.stringify([rawVuln({
       details_loaded: false,
@@ -99,6 +120,23 @@ describe('Vulnerabilities parsing CVSS branches', () => {
     expect(vuln.texts).toEqual([]);
     expect(vuln.urls).toEqual([]);
     expect(vuln.severity.cvss[0].attack_vector).toBe('ADJACENT');
+  });
+
+  test.each([
+    [{ baseVariantId: 'base-1', operation: 'intersection' }, {
+      variant_id: 'base-1', compare_variant_id: 'compare-1', operation: 'intersection',
+    }],
+    [{ variantIds: ['v1', 'v2', 'v3'], multiOperation: 'union' }, {
+      variant_ids: 'v1,v2,v3', project_id: 'project-1', operation: 'union',
+    }],
+  ])('historical description search forwards the list comparison scope', async (comparison, params) => {
+    fetchMock.mockResponseOnce(JSON.stringify({ matches: {} }));
+    await Vulnerabilities.searchDescriptionTerms(
+      ['CVE-TEST-1'], ['historical'], 'baseVariantId' in comparison ? 'compare-1' : undefined,
+      'project-1', undefined, true, comparison,
+    );
+    const url = new URL(fetchMock.mock.calls[0][0] as string);
+    expect(Object.fromEntries(url.searchParams)).toEqual({ include_outdated: 'true', ...params });
   });
 
   test('preserves unscored CVSS metadata in compact records', async () => {
@@ -170,7 +208,7 @@ describe('Vulnerabilities parsing CVSS branches', () => {
     }));
 
     const matches = await Vulnerabilities.searchDescriptionTerms(
-      ['CVE-TEST-1'], ['kernel', 'overflow'], 'variant-1', 'project-1',
+      ['CVE-TEST-1'], ['kernel', 'overflow'], 'variant-1', 'project-1', undefined, true,
     );
 
     expect(matches).toEqual({ kernel: ['CVE-TEST-1'], overflow: [] });
@@ -178,6 +216,7 @@ describe('Vulnerabilities parsing CVSS branches', () => {
     const calledUrl = new URL(requestUrl as string);
     expect(calledUrl.pathname).toContain('/api/vulnerabilities/search-descriptions');
     expect(calledUrl.searchParams.get('variant_id')).toBe('variant-1');
+    expect(calledUrl.searchParams.get('include_outdated')).toBe('true');
     expect(calledUrl.searchParams.has('project_id')).toBe(false);
     expect(request?.method).toBe('POST');
     expect(JSON.parse(request?.body as string)).toEqual({
@@ -637,6 +676,48 @@ describe('buildStatusSummary helpers', () => {
     const summary = buildStatusSummary(assessments, ['linux-yocto@6.6.129']);
     expect(summary.dominant_status).toBe('Pending Assessment');
     expect(summary.counts['Not affected']).toBeUndefined();
+  });
+
+  test('includes deprecated package statuses only when an expanded status scope is supplied', () => {
+    const assessments = [
+      makePkgAssessment('Pending Assessment', '2024-01-01T00:00:00', 'v1', ['linux-yocto@6.6.129']),
+      makePkgAssessment('Fixed', '2024-02-01T00:00:00', 'v1', ['linux-yocto@6.6.122']),
+    ];
+    const currentOnly = buildStatusSummary(
+      assessments,
+      ['linux-yocto@6.6.129'],
+      { v1: ['linux-yocto@6.6.129'] },
+    );
+    expect(currentOnly.counts).toEqual({ 'Pending Assessment': 1 });
+
+    const withOutdated = buildStatusSummary(
+      assessments,
+      ['linux-yocto@6.6.129'],
+      { v1: ['linux-yocto@6.6.129'] },
+      { v1: ['linux-yocto@6.6.122', 'linux-yocto@6.6.129'] },
+    );
+    expect(withOutdated.counts).toEqual({ 'Pending Assessment': 1, Fixed: 1 });
+  });
+
+  test('an assessment edit updates each row’s own package status summary', async () => {
+    const currentPackages = ['pkg@2'];
+    const oldAssessment = makePkgAssessment('Fixed', '2024-01-01T00:00:00', 'v1', ['pkg@1']);
+    const currentAssessment = makePkgAssessment('Pending Assessment', '2024-02-01T00:00:00', 'v1', ['pkg@2']);
+    currentAssessment.id = 'current-assessment';
+    fetchMock.mockResponseOnce(JSON.stringify([rawVuln({
+      packages: currentPackages, packages_current: currentPackages, packages_current_by_variant: { v1: currentPackages },
+    })]));
+    const [row] = await Vulnerabilities.list('v1');
+    const current = { ...row, assessments: [oldAssessment] };
+    const historical = {
+      ...current, packages: ['pkg@1', ...currentPackages], packages_status_by_variant: { v1: ['pkg@1', 'pkg@2'] },
+    };
+    const mutate = patchAssessments([], [currentAssessment]);
+    expect(mutate(current)).toMatchObject({
+      packages: ['pkg@2'], status_summary: { counts: { 'Pending Assessment': 1 } },
+    });
+    expect(mutate(current).status_summary?.counts.Fixed).toBeUndefined();
+    expect(mutate(historical).status_summary?.counts).toEqual({ 'Pending Assessment': 1, Fixed: 1 });
   });
 
   test('keeps assessments without packages when current packages given', () => {

@@ -34,6 +34,7 @@ type Vulnerability = {
     packages: string[];
     packages_current: string[];
     packages_current_by_variant?: Record<string, string[]>;
+    packages_status_by_variant?: Record<string, string[]>;
     variants: string[];
     urls: string[];
     cpes?: string[];
@@ -96,6 +97,20 @@ export function patchEffort(saved?: Partial<Record<keyof Vulnerability['effort']
     return (latest: Vulnerability): Vulnerability => ({ ...latest, effort: { ...latest.effort, ...delta } });
 }
 
+export function patchAssessments(removed: Iterable<string>, added: Assessment[] = []) {
+    const replaced = new Set([...removed, ...added.map(assessment => assessment.id)]);
+    return (latest: Vulnerability): Vulnerability => {
+        const assessments = [
+            ...latest.assessments.filter(assessment => !replaced.has(assessment.id)),
+            ...added,
+        ].sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+        const status_summary = buildStatusSummary(
+            assessments, latest.packages_current, latest.packages_current_by_variant, latest.packages_status_by_variant,
+        );
+        return { ...latest, assessments, status_summary, simplified_status: status_summary.dominant_status };
+    };
+}
+
 const SEVERITY_ORDER = ['NONE', 'UNKNOWN', 'LOW', 'MEDIUM', 'HIGH', 'CRITICAL'];
 const STATUS_SORT_ORDER = ['unknown', 'Pending Assessment', 'Exploitable', 'Not affected', 'Fixed'];
 const STATUS_DOMINANT_PRIORITY = ['Exploitable', 'Pending Assessment', 'Not affected', 'Fixed', 'unknown'];
@@ -129,8 +144,10 @@ const buildStatusSummary = (
     assessments: Assessment[],
     currentPackages?: string[],
     currentPackagesByVariant?: Record<string, string[]>,
+    statusPackagesByVariant?: Record<string, string[]>,
 ): StatusSummary => {
-    const hasVariantPackageScope = currentPackagesByVariant !== undefined;
+    const packageScopeByVariant = statusPackagesByVariant ?? currentPackagesByVariant;
+    const hasVariantPackageScope = packageScopeByVariant !== undefined;
     let legacyCurrentPackages: Set<string> | undefined;
     if (!hasVariantPackageScope && currentPackages && currentPackages.length > 0
         && assessments.length > 0) {
@@ -160,7 +177,11 @@ const buildStatusSummary = (
     // Supersession applies to exact package/variant targets, not whole variants.
     // Keep a fallback slot for legacy assessments with no package target.
     const latestPerTarget = new Map<string, Assessment>();
-    const globalCurrentPackages = new Set(currentPackages ?? []);
+    const globalCurrentPackages = new Set(
+        statusPackagesByVariant
+            ? Object.values(statusPackagesByVariant).flat()
+            : currentPackages ?? [],
+    );
     assessments.forEach((assessment) => {
         const variantIds = assessmentVariantIds(assessment);
         const keys = variantIds.length > 0 ? variantIds : ['__no_variant__'];
@@ -170,7 +191,7 @@ const buildStatusSummary = (
                 : assessmentPackagesInVariant(assessment, key)) ?? [];
             const currentForVariant = hasVariantPackageScope
                 ? key !== '__no_variant__'
-                    ? new Set(currentPackagesByVariant?.[key] ?? [])
+                    ? new Set(packageScopeByVariant?.[key] ?? [])
                     : globalCurrentPackages
                 : legacyCurrentPackages;
             const packages = targetPackages.length > 0
@@ -281,6 +302,12 @@ const asVulnerability = (data: any): Vulnerability | [] => {
             ? Object.fromEntries(Object.entries(data.packages_current_by_variant)
                 .map(([variantId, packages]) => [variantId, asStringArray(packages)]))
             : undefined,
+        packages_status_by_variant: data?.packages_status_by_variant
+            && typeof data.packages_status_by_variant === 'object'
+            && !Array.isArray(data.packages_status_by_variant)
+            ? Object.fromEntries(Object.entries(data.packages_status_by_variant)
+                .map(([variantId, packages]) => [variantId, asStringArray(packages)]))
+            : undefined,
         variants: asStringArray(data?.variants),
         urls: asStringArray(data?.urls),
         cpes: asStringArray(data?.cpes),
@@ -339,6 +366,25 @@ const asVulnerability = (data: any): Vulnerability | [] => {
     return vuln
 }
 
+function setScopeParams(
+    params: URLSearchParams, variantId?: string, projectId?: string, compareVariantId?: string,
+    operation?: string, variantIds?: string[], multiOperation?: string,
+) {
+    if (variantId && compareVariantId) {
+        params.set('variant_id', variantId);
+        params.set('compare_variant_id', compareVariantId);
+        if (operation) params.set('operation', operation);
+    } else if (variantIds && variantIds.length >= 2) {
+        params.set('variant_ids', variantIds.join(','));
+        if (multiOperation) params.set('operation', multiOperation);
+        if (projectId) params.set('project_id', projectId);
+    } else if (variantId) {
+        params.set('variant_id', variantId);
+    } else if (projectId) {
+        params.set('project_id', projectId);
+    }
+}
+
 class Vulnerabilities {
     static async matchCondition(condition: string, vulnerabilities: Vulnerability[]): Promise<string[]> {
         // Facts must stay aligned with the CI fail-condition evaluation in
@@ -383,22 +429,11 @@ class Vulnerabilities {
             : [];
     }
 
-    static async list(variantId?: string, projectId?: string, compareVariantId?: string, operation?: string, variantIds?: string[], multiOperation?: string, signal?: AbortSignal): Promise<Vulnerability[]> {
+    static async list(variantId?: string, projectId?: string, compareVariantId?: string, operation?: string, variantIds?: string[], multiOperation?: string, signal?: AbortSignal, includeOutdated = false): Promise<Vulnerability[]> {
         const url = new URL(import.meta.env.VITE_API_URL + "/api/vulnerabilities", window.location.href);
         url.searchParams.set('format', 'compact');
-        if (variantId && compareVariantId) {
-            url.searchParams.set('variant_id', variantId);
-            url.searchParams.set('compare_variant_id', compareVariantId);
-            if (operation) url.searchParams.set('operation', operation);
-        } else if (variantIds && variantIds.length >= 2) {
-            url.searchParams.set('variant_ids', variantIds.join(','));
-            if (multiOperation) url.searchParams.set('operation', multiOperation);
-            if (projectId) url.searchParams.set('project_id', projectId);
-        } else if (variantId) {
-            url.searchParams.set('variant_id', variantId);
-        } else if (projectId) {
-            url.searchParams.set('project_id', projectId);
-        }
+        if (includeOutdated) url.searchParams.set('include_outdated', 'true');
+        setScopeParams(url.searchParams, variantId, projectId, compareVariantId, operation, variantIds, multiOperation);
         const response = await fetch(url.toString(), {
             mode: "cors",
             signal,
@@ -436,15 +471,27 @@ class Vulnerabilities {
         variantId?: string,
         projectId?: string,
         signal?: AbortSignal,
+        includeOutdated = false,
+        comparison?: {
+            baseVariantId?: string;
+            operation?: string;
+            variantIds?: string[];
+            multiOperation?: string;
+        },
     ): Promise<Record<string, string[]>> {
         const url = new URL(
             import.meta.env.VITE_API_URL + '/api/vulnerabilities/search-descriptions',
             window.location.href,
         );
-        if (variantId) {
-            url.searchParams.set('variant_id', variantId);
-        } else if (projectId) {
-            url.searchParams.set('project_id', projectId);
+        if (includeOutdated) {
+            url.searchParams.set('include_outdated', 'true');
+            setScopeParams(
+                url.searchParams, comparison?.baseVariantId ?? variantId, projectId,
+                comparison?.baseVariantId ? variantId : undefined, comparison?.operation,
+                comparison?.variantIds, comparison?.multiOperation,
+            );
+        } else {
+            setScopeParams(url.searchParams, variantId, projectId);
         }
         const response = await fetch(url.toString(), {
             method: 'POST',
@@ -513,6 +560,7 @@ class Vulnerabilities {
                 vulnAssessments,
                 vuln.packages_current,
                 vuln.packages_current_by_variant,
+                vuln.packages_status_by_variant,
             );
             return {
                 ...vuln,
@@ -534,6 +582,7 @@ class Vulnerabilities {
                     assessments,
                     vuln.packages_current,
                     vuln.packages_current_by_variant,
+                    vuln.packages_status_by_variant,
                 );
                 return {
                     ...vuln,

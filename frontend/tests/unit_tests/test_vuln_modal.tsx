@@ -793,7 +793,7 @@ describe('Vulnerability Modal', () => {
         await waitFor(() => {
             expect(patchVuln).toHaveBeenCalled();
             const lastCall = patchVuln.mock.calls[patchVuln.mock.calls.length - 1];
-            expect(lastCall[1].severity.cvss).toHaveLength(2);
+            expect(lastCall[1](vulnerability).severity.cvss).toHaveLength(2);
         });
 
         const successBanner = await screen.findByText(/successfully added custom cvss/i);
@@ -2639,7 +2639,7 @@ describe('Vulnerability Modal', () => {
 
         // The recomputed summary drops the deleted variant and reflects the
         // remaining "Not affected" assessment (no active status left).
-        expect(patchVuln).toHaveBeenCalledWith('CVE-2010-1234', expect.objectContaining({
+        expect(patchVuln.mock.calls[0][1](vulnWithTwoVariants)).toEqual(expect.objectContaining({
             simplified_status: 'Not affected',
             status_summary: expect.objectContaining({
                 dominant_status: 'Not affected',
@@ -3131,13 +3131,14 @@ describe('Vulnerability Modal', () => {
 
         const fullHistory = jest.fn().mockResolvedValueOnce(JSON.stringify([affected, pending]))
             .mockResolvedValue(JSON.stringify([affected, approved]));
-        renderWithPendingAiAssessment({ patchVuln, isEditing: true, fullHistory, explorerState: {
+        const explorerState = {
             assessments: [affected], packages_current_by_variant: { 'variant-1': affected.packages },
             simplified_status: 'Exploitable', status_summary: {
                 dominant_status: 'Exploitable', has_active_status: true, total_assessments: 1,
                 counts: { Exploitable: 1 }, ordered: [{ status: 'Exploitable', count: 1 }],
             },
-        } });
+        };
+        renderWithPendingAiAssessment({ patchVuln, isEditing: true, fullHistory, explorerState });
         const user = userEvent.setup();
 
         await screen.findByText(/AI-generated/i);
@@ -3163,7 +3164,7 @@ describe('Vulnerability Modal', () => {
         await waitFor(() => {
             expect(screen.queryByText(/AI-generated/i)).not.toBeInTheDocument();
         });
-        expect(patchVuln).toHaveBeenCalledWith(vulnerability.id, expect.objectContaining({
+        expect(patchVuln.mock.calls[0][1]({ ...vulnerability, ...explorerState })).toEqual(expect.objectContaining({
             simplified_status: 'Fixed',
             status_summary: expect.objectContaining({ dominant_status: 'Fixed', counts: { Fixed: 1 }, has_active_status: false }),
         }));
@@ -4109,7 +4110,7 @@ describe('NVD & EPSS refresh button in VulnModal', () => {
         expect(refreshUrl.searchParams.get('project_id')).toBe(projectId);
         expect(refreshUrl.searchParams.get('variant_id')).toBe(variantId ?? null);
         expect(Vulnerabilities.getDetails).toHaveBeenCalledWith(vulnerability.id, variantId, projectId);
-        const refreshed = patchVuln.mock.calls[0][1] as Vulnerability;
+        const refreshed = patchVuln.mock.calls[0][1](scopedVuln) as Vulnerability;
         expect(refreshed).toEqual({
             ...scopedVuln,
             aliases: details.aliases,
@@ -4145,7 +4146,7 @@ describe('NVD & EPSS refresh button in VulnModal', () => {
         expect(await screen.findByText(/Failed to load refreshed vulnerability details: Error: HTTP 503/)).toBeInTheDocument();
         expect(screen.getByText('EPSS, ENISA EUVD Updated')).toBeInTheDocument();
         expect(screen.queryByText('Updated')).not.toBeInTheDocument();
-        expect(patchVuln).toHaveBeenCalledWith(vulnerability.id, expect.objectContaining({
+        expect(patchVuln.mock.calls[0][1](vulnerability)).toEqual(expect.objectContaining({
             texts: vulnerability.texts, severity: vulnerability.severity, epss: updatedVulnPayload.epss,
         }));
     });
@@ -4169,7 +4170,7 @@ describe('NVD & EPSS refresh button in VulnModal', () => {
 
         await userEvent.setup().click(screen.getByTitle('Refresh from NVD, EPSS & ENISA EUVD'));
         await waitFor(() => expect(patchVuln).toHaveBeenCalledTimes(1));
-        const refreshed = patchVuln.mock.calls[0][1] as Vulnerability;
+        const refreshed = patchVuln.mock.calls[0][1](vulnerability) as Vulnerability;
         expect(refreshed).toEqual(expect.objectContaining({
             aliases: [euvd.id], euvd, euvd_fetched_at: '2026-11-11T10:00:00Z',
             texts: vulnerability.texts, packages: vulnerability.packages,
@@ -4220,7 +4221,7 @@ describe('NVD & EPSS refresh button in VulnModal', () => {
         await user.click(screen.getByTitle('Refresh from NVD, EPSS & ENISA EUVD'));
 
         await waitFor(() => {
-            expect(patchVuln).toHaveBeenCalledWith(vulnerability.id, expect.objectContaining({ id: vulnerability.id }));
+            expect(patchVuln).toHaveBeenCalledWith(vulnerability.id, expect.any(Function));
         });
     });
 
@@ -4254,8 +4255,8 @@ describe('NVD & EPSS refresh button in VulnModal', () => {
         await user.click(screen.getByTitle('Refresh from NVD, EPSS & ENISA EUVD'));
 
         await waitFor(() => {
-            expect(patchVuln).toHaveBeenCalledWith(
-                vulnWithAssessment.id,
+            expect(patchVuln).toHaveBeenCalledWith(vulnWithAssessment.id, expect.any(Function));
+            expect(patchVuln.mock.calls[0][1](vulnWithAssessment)).toEqual(
                 expect.objectContaining({
                     found_by: ['grype', 'osv'],
                     simplified_status: 'Not Affected',

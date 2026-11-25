@@ -2,6 +2,7 @@ import Vulnerabilities, { type Vulnerability, type VulnerabilityPatch } from "..
 import type { CVSS } from "../handlers/vulnerabilities";
 import type { Assessment } from "../handlers/assessments";
 import Assessments from "../handlers/assessments";
+import { removeDuplicateAssessments } from "../handlers/assessments";
 import type { RefreshProgressView } from "../handlers/operationStore";
 import { createColumnHelper, SortingFn, RowSelectionState, Row, Table } from '@tanstack/react-table'
 import { useMemo, useState, useEffect, useCallback, useRef, useSyncExternalStore } from "react";
@@ -28,6 +29,7 @@ type SourceBanner = { message: string; type: 'error' | 'success' } | null;
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import { faFilter, faCaretDown, faCircleQuestion, faSync, faCircleInfo, faBook } from '@fortawesome/free-solid-svg-icons';
 import ExplicitSearchInput from '../components/ExplicitSearchInput';
+import ToggleSwitch from '../components/ToggleSwitch';
 import { useLocalStorageState } from '../handlers/localStorage';
 import RangeSlider from "../components/RangeSlider";
 
@@ -460,6 +462,10 @@ function TableVulnerabilities ({ vulnerabilities, filterLabel, filterValue, filt
     const [showShortcutHelper, setShowShortcutHelper] = useState(false);
     const [showSearchHelper, setShowSearchHelper] = useState(false);
     const [showMoreFilters, setShowMoreFilters] = useState(false);
+    const [includeOutdated, setIncludeOutdated] = useState(false);
+    const [outdatedVulnerabilities, setOutdatedVulnerabilities] = useState<Vulnerability[] | null>(null);
+    const [outdatedLoading, setOutdatedLoading] = useState(false);
+    const includeOutdatedRef = useRef(includeOutdated);
     const [aiSuggestionFilter, setAiSuggestionFilter] = useLocalStorageState<'any' | 'has' | 'no'>(`${preferenceKey}.aiSuggestion`, 'any', { skipInitialRead: isFilterJump });
     const [aiSuggestionVulnIds, setAiSuggestionVulnIds] = useState<Set<string>>(new Set());
 
@@ -470,6 +476,73 @@ function TableVulnerabilities ({ vulnerabilities, filterLabel, filterValue, filt
     const searchHelperButtonRef = useRef<HTMLButtonElement>(null);
     const searchHelperDropdownRef = useRef<HTMLDivElement>(null);
     const moreFiltersRef = useRef<HTMLDivElement>(null);
+    const outdatedRequestRef = useRef<AbortController | null>(null);
+
+    const tableVulnerabilities = includeOutdated && outdatedVulnerabilities
+        ? outdatedVulnerabilities
+        : vulnerabilities;
+
+    const toggleOutdated = useCallback(async (checked: boolean) => {
+        if (!checked) {
+            outdatedRequestRef.current?.abort();
+            setOutdatedLoading(false);
+            setIncludeOutdated(false);
+            return;
+        }
+
+        const controller = new AbortController();
+        outdatedRequestRef.current?.abort();
+        outdatedRequestRef.current = controller;
+        setOutdatedLoading(true);
+        try {
+            const assessmentRequests = variantIds && variantIds.length >= 2
+                ? variantIds.map(id => Assessments.list(id, projectId, controller.signal))
+                : baseVariantId && variantId
+                    ? [Assessments.list(baseVariantId, projectId, controller.signal),
+                        Assessments.list(variantId, projectId, controller.signal)]
+                    : [Assessments.list(variantId, projectId, controller.signal)];
+            const [allVulnerabilities, assessmentGroups] = await Promise.all([
+                Vulnerabilities.list(
+                    baseVariantId ?? variantId,
+                    projectId,
+                    baseVariantId ? variantId : undefined,
+                    compareOperation,
+                    variantIds,
+                    multiOperation,
+                    controller.signal,
+                    true,
+                ),
+                Promise.all(assessmentRequests),
+            ]);
+            if (controller.signal.aborted) return;
+            setOutdatedVulnerabilities(Vulnerabilities.enrich_with_assessments(
+                allVulnerabilities,
+                removeDuplicateAssessments(assessmentGroups.flat()),
+            ));
+            setIncludeOutdated(true);
+        } catch {
+            if (!controller.signal.aborted) {
+                setGeneralBanner({ message: 'Failed to load outdated vulnerabilities', type: 'error' });
+            }
+        } finally {
+            if (!controller.signal.aborted) setOutdatedLoading(false);
+        }
+    }, [baseVariantId, compareOperation, multiOperation, projectId, variantId, variantIds]);
+
+    const toggleOutdatedRef = useRef(toggleOutdated);
+    const previousVulnerabilitiesRef = useRef(vulnerabilities);
+    useEffect(() => {
+        includeOutdatedRef.current = includeOutdated;
+        toggleOutdatedRef.current = toggleOutdated;
+    }, [includeOutdated, toggleOutdated]);
+    useEffect(() => {
+        if (previousVulnerabilitiesRef.current === vulnerabilities) return;
+        previousVulnerabilitiesRef.current = vulnerabilities;
+        setOutdatedVulnerabilities(null);
+        if (includeOutdatedRef.current) void toggleOutdatedRef.current(true);
+    }, [vulnerabilities]);
+
+    useEffect(() => () => outdatedRequestRef.current?.abort(), []);
 
     const keyboardShortcuts = [
         { key: '/', description: 'Focus search bar' },
@@ -491,8 +564,8 @@ function TableVulnerabilities ({ vulnerabilities, filterLabel, filterValue, filt
     // sbom-cve-check scan). When at least one vulnerability already has a
     // published date, the filter is usable even if NVD has never synced.
     const hasAnyPublishedDate = useMemo(
-        () => vulnerabilities.some(v => !!v.published),
-        [vulnerabilities]
+        () => tableVulnerabilities.some(v => !!v.published),
+        [tableVulnerabilities]
     );
 
     const isMissingEuvdDataBannerDismissed = missingEuvdDataBannerDismissed ?? localMissingEuvdDataBannerDismissed;
@@ -509,18 +582,18 @@ function TableVulnerabilities ({ vulnerabilities, filterLabel, filterValue, filt
     }, [missingPublishedDateDataBannerDismissed, onMissingPublishedDateDataBannerDismissedChange]);
 
     const hasAnyEuvdData = useMemo(
-        () => vulnerabilities.some(v => typeof v.euvd_fetched_at === "string" && v.euvd_fetched_at !== ""),
-        [vulnerabilities]
+        () => tableVulnerabilities.some(v => typeof v.euvd_fetched_at === "string" && v.euvd_fetched_at !== ""),
+        [tableVulnerabilities]
     );
     const previousHasAnyEuvdData = useRef(hasAnyEuvdData);
     const previousHasAnyPublishedDate = useRef(hasAnyPublishedDate);
 
-    const shouldShowMissingEuvdDataBanner = vulnerabilities.length > 0 &&
+    const shouldShowMissingEuvdDataBanner = tableVulnerabilities.length > 0 &&
         !hasAnyEuvdData &&
         !euvdProgress?.in_progress &&
         !isMissingEuvdDataBannerDismissed;
 
-    const shouldShowMissingPublishedDateDataBanner = vulnerabilities.length > 0 &&
+    const shouldShowMissingPublishedDateDataBanner = tableVulnerabilities.length > 0 &&
         !hasAnyPublishedDate &&
         !nvdProgress?.in_progress &&
         !isMissingPublishedDateDataBannerDismissed;
@@ -570,6 +643,7 @@ function TableVulnerabilities ({ vulnerabilities, filterLabel, filterValue, filt
         setEpssRange({ min: 0, max: 100 });
         setSelectedAttackVectors([]);
         setSelectedFirstScanDates([]);
+        void toggleOutdated(false);
         setAiSuggestionFilter('any');
     }, [
         filterLabel, filterValue,
@@ -577,7 +651,7 @@ function TableVulnerabilities ({ vulnerabilities, filterLabel, filterValue, filt
         setSearch, setDraftSearch,
         setPublishedDateFilterType, setPublishedDateValue, setPublishedDaysValue, setPublishedDateFrom, setPublishedDateTo,
         setShowCustomSeverityFilter, setSeverityRange, setShowCustomEpssFilter, setEpssRange,
-        setSelectedAttackVectors, setSelectedFirstScanDates, setAiSuggestionFilter,
+        setSelectedAttackVectors, setSelectedFirstScanDates, setAiSuggestionFilter, toggleOutdated,
     ]);
 
     // Fetch pending AI suggestions (origin == 'ai') for the current scope. These are
@@ -623,19 +697,19 @@ function TableVulnerabilities ({ vulnerabilities, filterLabel, filterValue, filt
 
     const attack_vector_list = useMemo(() => {
         const avSet = new Set<string>();
-        vulnerabilities.forEach(vuln => {
+        tableVulnerabilities.forEach(vuln => {
             vuln.severity.cvss.forEach(cvss => {
                 if (cvss.attack_vector) avSet.add(cvss.attack_vector);
             });
         });
         const order = ['NETWORK', 'ADJACENT', 'LOCAL', 'PHYSICAL'];
         return Array.from(avSet).sort((a, b) => order.indexOf(a) - order.indexOf(b));
-    }, [vulnerabilities]);
+    }, [tableVulnerabilities]);
 
     // Build list of distinct first-scan timestamps, grouped by scan (same second = same scan)
     const availableFirstScanDates = useMemo(() => {
         const tsSet = new Set<number>();
-        vulnerabilities.forEach(vuln => {
+        tableVulnerabilities.forEach(vuln => {
             if (vuln.first_scan_date) {
                 // Round to the nearest second to group identical scans
                 const ts = Math.round(new Date(vuln.first_scan_date).getTime() / 1000) * 1000;
@@ -643,7 +717,7 @@ function TableVulnerabilities ({ vulnerabilities, filterLabel, filterValue, filt
             }
         });
         return Array.from(tsSet).sort((a, b) => a - b);
-    }, [vulnerabilities]);
+    }, [tableVulnerabilities]);
 
     const formatScanDate = useCallback((ts: number) => {
         const d = new Date(ts);
@@ -658,13 +732,13 @@ function TableVulnerabilities ({ vulnerabilities, filterLabel, filterValue, filt
         });
     }, []);
 
-    const sources_list = useMemo(() => vulnerabilities.reduce((acc: string[], vuln) => {
+    const sources_list = useMemo(() => tableVulnerabilities.reduce((acc: string[], vuln) => {
         vuln.found_by.forEach(source => {
             if (!acc.includes(source) && source != '')
                 acc.push(source)
         });
         return acc;
-    }, []), [vulnerabilities])
+    }, []), [tableVulnerabilities])
 
     const sources_display_list = useMemo(
         () => sources_list.map(formatSourceName),
@@ -676,8 +750,8 @@ function TableVulnerabilities ({ vulnerabilities, filterLabel, filterValue, filt
     // preselection (e.g. from filterValue) can still be unchecked by the user.
     const packages_list = useMemo(() => {
         const pkgSet = new Set<string>();
-        vulnerabilities.forEach(vuln => {
-            vuln.packages_current.forEach(pkg => {
+        tableVulnerabilities.forEach(vuln => {
+            (includeOutdated ? vuln.packages : vuln.packages_current).forEach(pkg => {
                 if (pkg !== '') pkgSet.add(pkg);
             });
         });
@@ -685,7 +759,7 @@ function TableVulnerabilities ({ vulnerabilities, filterLabel, filterValue, filt
             if (pkg !== '') pkgSet.add(pkg);
         });
         return Array.from(pkgSet).sort((a, b) => formatPkgId(a).localeCompare(formatPkgId(b)));
-    }, [vulnerabilities, selectedPackages]);
+    }, [tableVulnerabilities, selectedPackages, includeOutdated]);
 
     const handleEditClick = useCallback((vuln: Vulnerability) => {
         const index = searchFilteredData.findIndex(v => v.id === vuln.id);
@@ -697,9 +771,17 @@ function TableVulnerabilities ({ vulnerabilities, filterLabel, filterValue, filt
     const handlePatchVuln = useCallback((vulnId: string, patch: VulnerabilityPatch) => {
         patchVuln(vulnId, patch);
         const update = (v: Vulnerability) => v.id !== vulnId ? v : typeof patch === 'function' ? patch(v) : patch;
+        setOutdatedVulnerabilities(current => current?.map(update) ?? null);
         setModalVuln(prev => prev && update(prev));
         setModalVulnSnapshot(prev => prev.map(update));
     }, [patchVuln]);
+
+    const handleAppendAssessment = useCallback((assessment: Assessment) => {
+        appendAssessment(assessment);
+        setOutdatedVulnerabilities(current => current
+            ? Vulnerabilities.append_assessment(current, assessment)
+            : current);
+    }, [appendAssessment]);
 
     const columnDisplayNames = useMemo(() => ({
         'select-checkbox': 'Select',
@@ -841,7 +923,7 @@ function TableVulnerabilities ({ vulnerabilities, filterLabel, filterValue, filt
             sortingFn: (rowA, rowB) => (rowA.original.epss?.score || 0.0) - (rowB.original.epss?.score || 0.0),
             size: 50,
             }),
-            columnHelper.accessor('packages_current', {
+            columnHelper.accessor(row => includeOutdated ? row.packages : row.packages_current, {
             id: 'packages',
             header: () => <div className="flex items-center justify-center">SBOM Affected</div>,
             cell: info => <div className="flex items-center justify-center h-full text-center">{info.getValue().map(p => formatPkgId(p.split('+git')[0])).join(', ')}</div>,
@@ -872,7 +954,7 @@ function TableVulnerabilities ({ vulnerabilities, filterLabel, filterValue, filt
             HintText: <>
                 <h3 className="font-bold text-white mb-2">Status Summary</h3>
                 <div className="space-y-1 text-gray-100">
-                    <p>Status aggregates the newest assessment for each package and variant in the current scope.</p>
+                    <p>Status aggregates the newest assessment for each package and variant in the current scope; enable Outdated to include superseded SBOM packages.</p>
                     <p>Scope follows your active project, variant, and compare selection.</p>
                     <p>Display lists every distinct outcome, for example: Exploitable, Pending Assessment.</p>
                     <p>Filtering matches vulnerabilities when any selected status is present in the summary.</p>
@@ -1226,7 +1308,7 @@ function TableVulnerabilities ({ vulnerabilities, filterLabel, filterValue, filt
                 size: 90
             })
         ]
-    }, [handleEditClick, searchFilteredData, showCustomSeverityFilter, severityRange, nvdProgress, epssProgress, euvdProgress]);
+    }, [handleEditClick, searchFilteredData, showCustomSeverityFilter, severityRange, nvdProgress, epssProgress, euvdProgress, includeOutdated]);
 
     const columns = useMemo(() => {
         const columnByDisplayName = new Map(
@@ -1252,7 +1334,7 @@ function TableVulnerabilities ({ vulnerabilities, filterLabel, filterValue, filt
 
     const dataToDisplay = useMemo(() => {
         const allowedVulnerabilityIds = filterVulnerabilityIds ? new Set(filterVulnerabilityIds) : null;
-        return vulnerabilities.filter((el) => {
+        return tableVulnerabilities.filter((el) => {
             if (allowedVulnerabilityIds && !allowedVulnerabilityIds.has(el.id)) return false;
             if (aiSuggestionFilter === 'has' && !aiSuggestionVulnIds.has(el.id)) return false;
             if (aiSuggestionFilter === 'no' && aiSuggestionVulnIds.has(el.id)) return false;
@@ -1263,7 +1345,8 @@ function TableVulnerabilities ({ vulnerabilities, filterLabel, filterValue, filt
                 if (!selectedStatuses.some(status => statusKeys.has(status))) return false;
             }
             if (selectedSources.length && !selectedSources.some(src => el.found_by.includes(src))) return false;
-            if (selectedPackageSet.size && !el.packages_current.some(pkg => selectedPackageSet.has(pkg))) return false;
+            const packagesInScope = includeOutdated ? el.packages : el.packages_current;
+            if (selectedPackageSet.size && !packagesInScope.some(pkg => selectedPackageSet.has(pkg))) return false;
 
             // Published date filter
             if (publishedDateFilterType && el.published) {
@@ -1355,15 +1438,16 @@ function TableVulnerabilities ({ vulnerabilities, filterLabel, filterValue, filt
 
             return true;
         });
-    }, [vulnerabilities, filterVulnerabilityIds, selectedSeverities, selectedStatuses, selectedSources, selectedPackageSet, publishedDateFilterType, publishedDateValue, publishedDaysValue, publishedDateFrom, publishedDateTo, showCustomSeverityFilter, severityRange, showCustomEpssFilter, epssRange, selectedAttackVectors, selectedFirstScanDates, aiSuggestionFilter, aiSuggestionVulnIds]);
+    }, [tableVulnerabilities, filterVulnerabilityIds, selectedSeverities, selectedStatuses, selectedSources, selectedPackageSet, publishedDateFilterType, publishedDateValue, publishedDaysValue, publishedDateFrom, publishedDateTo, showCustomSeverityFilter, severityRange, showCustomEpssFilter, epssRange, selectedAttackVectors, selectedFirstScanDates, aiSuggestionFilter, aiSuggestionVulnIds, includeOutdated]);
 
     const searchableData = useMemo(() => dataToDisplay.map(vuln => ({
         ...vuln,
+        texts: includeOutdated && vuln.details_loaded === false ? [] : vuln.texts,
         description_search_terms: Object.entries(descriptionMatches)
             .filter(([, ids]) => ids.has(vuln.id))
             .map(([term]) => term)
             .join(' ') || '\0',
-    })), [dataToDisplay, descriptionMatches]);
+    })), [dataToDisplay, descriptionMatches, includeOutdated]);
 
     const applySearch = useCallback(async () => {
         const nextSearch = draftSearch.trim();
@@ -1372,7 +1456,7 @@ function TableVulnerabilities ({ vulnerabilities, filterLabel, filterValue, filt
         setDescriptionSearchError(false);
 
         if (nextSearch.length <= 2 || terms.length === 0 ||
-            vulnerabilities.every(vuln => vuln.details_loaded !== false)) {
+            tableVulnerabilities.every(vuln => vuln.details_loaded !== false)) {
             if (!nextSearch) setDescriptionMatches({});
             setSearch(nextSearch);
             setDescriptionSearchLoading(false);
@@ -1384,11 +1468,13 @@ function TableVulnerabilities ({ vulnerabilities, filterLabel, filterValue, filt
         setDescriptionSearchLoading(true);
         try {
             const matches = await Vulnerabilities.searchDescriptionTerms(
-                vulnerabilities.map(vuln => vuln.id),
+                tableVulnerabilities.map(vuln => vuln.id),
                 terms,
                 variantId,
                 projectId,
                 controller.signal,
+                includeOutdated,
+                { baseVariantId, operation: compareOperation, variantIds, multiOperation },
             );
             if (controller.signal.aborted) return;
             setDescriptionMatches(Object.fromEntries(
@@ -1403,7 +1489,8 @@ function TableVulnerabilities ({ vulnerabilities, filterLabel, filterValue, filt
         } finally {
             if (!controller.signal.aborted) setDescriptionSearchLoading(false);
         }
-    }, [draftSearch, vulnerabilities, variantId, projectId, setSearch]);
+    }, [draftSearch, tableVulnerabilities, variantId, projectId, setSearch, includeOutdated,
+        baseVariantId, compareOperation, variantIds, multiOperation]);
 
     const applySearchRef = useRef(applySearch);
     applySearchRef.current = applySearch;
@@ -1430,7 +1517,7 @@ function TableVulnerabilities ({ vulnerabilities, filterLabel, filterValue, filt
         }
         if (draftSearch.trim()) void applySearchRef.current();
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [vulnerabilities]);
+    }, [tableVulnerabilities]);
 
     useEffect(() => () => descriptionSearchController.current?.abort(), []);
 
@@ -1449,12 +1536,12 @@ function TableVulnerabilities ({ vulnerabilities, filterLabel, filterValue, filt
 
     const availableStatuses = useMemo(() => {
         const statuses = new Set<string>();
-        vulnerabilities.forEach(vuln => {
+        tableVulnerabilities.forEach(vuln => {
             const summary = getVulnerabilityStatusSummary(vuln);
             Object.keys(summary.counts).forEach(status => statuses.add(status));
         });
         return Array.from(statuses).sort((a, b) => getStatusSortIndex(a) - getStatusSortIndex(b));
-    }, [vulnerabilities]);
+    }, [tableVulnerabilities]);
 
     const handleModalNavigation = (newIndex: number) => {
         if (newIndex >= 0 && newIndex < modalVulnSnapshot.length) {
@@ -1621,7 +1708,7 @@ function TableVulnerabilities ({ vulnerabilities, filterLabel, filterValue, filt
 
             <FilterOption
                 label="Severity"
-                options={Array.from(new Set(vulnerabilities.map(v => v.severity.severity))).sort((a, b) =>
+                options={Array.from(new Set(tableVulnerabilities.map(v => v.severity.severity))).sort((a, b) =>
                     SEVERITY_ORDER.map(s => s.toLowerCase()).indexOf(b.toLowerCase()) - SEVERITY_ORDER.map(s => s.toLowerCase()).indexOf(a.toLowerCase())
                 )}
                 selected={selectedSeverities}
@@ -1810,12 +1897,21 @@ function TableVulnerabilities ({ vulnerabilities, filterLabel, filterValue, filt
                                     Filter by pending AI suggestion in the current scope.
                                 </p>
                             </div>
+
                         </div>
                     </div>
                 )}
             </div>
 
-            {/* Package selection is handled by the Packages filter dropdown above */}
+            <div className="flex items-center gap-2" title="Include vulnerabilities and statuses for superseded SBOM packages">
+                <ToggleSwitch
+                    enabled={includeOutdated}
+                    setEnabled={checked => void toggleOutdated(checked)}
+                    disabled={outdatedLoading}
+                    label="Outdated"
+                />
+                {outdatedLoading && <span role="status" className="text-xs text-gray-300">Loading outdated vulnerabilities…</span>}
+            </div>
 
             <div className="ml-auto flex items-center gap-2 relative">
                 <button
@@ -1865,10 +1961,10 @@ function TableVulnerabilities ({ vulnerabilities, filterLabel, filterValue, filt
         </div>
 
         <MultiEditBar
-            vulnerabilities={vulnerabilities}
+            vulnerabilities={tableVulnerabilities}
             selectedVulns={selectedVulns}
             resetVulns={() => setSelectedRows({})}
-            appendAssessment={appendAssessment}
+            appendAssessment={handleAppendAssessment}
             patchVuln={handlePatchVuln}
             triggerBanner={triggerBanner}
             hideBanner={closeBanner}
@@ -1884,7 +1980,9 @@ function TableVulnerabilities ({ vulnerabilities, filterLabel, filterValue, filt
         <TableGeneric
             persistenceKey={preferenceKey}
             fuseKeys={fuseKeys}
-            forAllValues={(vuln) => (vuln.packages_current?.length ? vuln.packages_current : vuln.packages)}
+            forAllValues={(vuln) => (includeOutdated
+                ? vuln.packages
+                : vuln.packages_current?.length ? vuln.packages_current : vuln.packages)}
             hoverField="texts"
             search={search}
             columns={columns}
@@ -1910,7 +2008,7 @@ function TableVulnerabilities ({ vulnerabilities, filterLabel, filterValue, filt
                 setModalVulnSnapshot([]);
                 setIsEditing(false);
             }}
-            appendAssessment={appendAssessment}
+            appendAssessment={handleAppendAssessment}
             appendCVSS={appendCVSS}
             patchVuln={handlePatchVuln}
             vulnerabilities={modalVulnSnapshot}
