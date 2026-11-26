@@ -457,6 +457,38 @@ describe('Vulnerability Table', () => {
         expect(screen.queryByRole('cell', { name: historical.id })).not.toBeInTheDocument();
     });
 
+    test('a failed Outdated refresh falls back to the latest current rows and drops stale selections', async () => {
+        const current = vulnerabilities[0];
+        const historical = { ...vulnerabilities[1], id: 'CVE-HISTORICAL-STALE' };
+        const updated = { ...current, id: 'CVE-CURRENT-NEW' };
+        let rejectReload: ((error: Error) => void) | undefined;
+        let loads = 0;
+        fetchMock.mockResponse(request => {
+            if (new URL(request.url).pathname !== '/api/vulnerabilities') return Promise.resolve('[]');
+            if (++loads === 1) return Promise.resolve(JSON.stringify([current, historical]));
+            return new Promise((_resolve, reject) => { rejectReload = reject; });
+        });
+        const table = (rows: Vulnerability[], revision: number) => (
+            <TableVulnerabilities vulnerabilities={rows} dataRevision={revision} variantId="variant-1"
+                appendAssessment={() => {}} appendCVSS={() => null} patchVuln={() => {}} />
+        );
+        const { rerender } = render(table([current], 1));
+        await userEvent.setup().click(screen.getByRole('button', { name: 'Show Outdated' }));
+        fireEvent.click(await screen.findByRole('cell', { name: historical.id }), { ctrlKey: true });
+        const bulkEstimate = screen.getByRole('button', { name: /change time estimate/i });
+        expect(bulkEstimate).toBeEnabled();
+
+        rerender(table([updated], 2));
+        await waitFor(() => expect(rejectReload).toBeDefined());
+        expect(screen.getByRole('cell', { name: historical.id })).toBeVisible();
+        await act(async () => rejectReload?.(new Error('reload failed')));
+        expect(screen.getByText('Failed to load outdated vulnerabilities')).toBeVisible();
+        expect(screen.getByRole('cell', { name: updated.id })).toBeVisible();
+        expect(screen.queryByRole('cell', { name: historical.id })).not.toBeInTheDocument();
+        expect(bulkEstimate).toBeDisabled();
+        expect(screen.getByRole('button', { name: 'Show Outdated', pressed: false })).toBeEnabled();
+    });
+
     test('saving effort from an Outdated row keeps the current row’s package scope', async () => {
         const current = {
             ...vulnerabilities[0], packages: ['scope-lib@2'], packages_current: ['scope-lib@2'],

@@ -539,6 +539,8 @@ function TableVulnerabilities ({ vulnerabilities, dataRevision, filterLabel, fil
             setIncludeOutdated(true);
         } catch {
             if (!controller.signal.aborted) {
+                setOutdatedDataset(null);
+                setIncludeOutdated(false);
                 setGeneralBanner({ message: 'Failed to load outdated vulnerabilities', type: 'error' });
             }
         } finally {
