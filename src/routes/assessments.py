@@ -1849,7 +1849,7 @@ def init_app(app: Flask) -> None:
                     ]
                     current = finding_packages_for_scans(
                         scan_ids, {finding.vulnerability_id for _, targets in prepared for finding in targets.values()}
-                    )
+                    ).writable
                     for assessment, targets in prepared:
                         stale = sorted(
                             f"{package} in {variant_id}"

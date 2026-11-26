@@ -47,6 +47,11 @@ Active filter dropdowns show a small checkmark; the **Outdated** switch shows it
 
 ## Row Selection and Bulk Editing
 
+Bulk status edits use exact current findings; a supplier match shown in the
+table does not by itself make that package writable. In a multi-variant
+comparison, bulk effort edits update only variants that contributed evidence
+for each selected row. In Difference, only the first variant can be updated.
+
 Each row has a checkbox on the left. Selecting one or more rows reveals the
 **multi-edit bar**, which applies a single assessment (status, justification,
 notes) to all selected vulnerabilities. Use it only when the same conclusion

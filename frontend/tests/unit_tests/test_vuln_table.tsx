@@ -1142,7 +1142,7 @@ describe('Vulnerability Table', () => {
 
         // ARRANGE
         const rows = vulnerabilities.map(vuln => ({
-            ...vuln, packages_current_by_variant: { 'variant-1': vuln.packages_current },
+            ...vuln, assessment_targets_by_variant: { 'variant-1': vuln.packages_current },
         }));
         render(<TableVulnerabilities vulnerabilities={rows} appendAssessment={() => {}} appendCVSS={() => null} patchVuln={() => {}} />);
 

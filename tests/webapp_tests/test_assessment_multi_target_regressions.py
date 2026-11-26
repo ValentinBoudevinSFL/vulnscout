@@ -414,6 +414,63 @@ def test_batch_keeps_exact_target_pairs_when_another_pair_was_observed(app, clie
     assert assessment["targets"] == targets
 
 
+@pytest.mark.parametrize("include_outdated", ["false", "true"])
+def test_advertised_current_targets_are_exact_and_writable(app, client, include_outdated):
+    from src.models.finding import Finding
+    from src.models.observation import Observation
+    from src.models.package import Package
+    from src.models.sbom_document import SBOMDocument
+    from src.models.sbom_package import SBOMPackage
+    from src.models.scan import Scan
+    from src.models.vulnerability import Vulnerability
+
+    vuln_id = "CVE-2099-12345"
+    with app.app_context():
+        Vulnerability.create_record(id=vuln_id, description="Synthetic supplier attribution")
+        exact = Package.find_or_create("synthetic-lib", "1")
+        alias = Package.find_or_create("synthetic-lib", "1", supplier="Supplier")
+        sbom = SBOMDocument(path="/synthetic/sbom.json", source_name="sbom.json", format="spdx", scan_id=SCAN_A)
+        old_tool = Scan(variant_id=VARIANT_A, scan_type="tool", scan_source="grype",
+                        timestamp=datetime(2020, 1, 1, tzinfo=timezone.utc))
+        tool = Scan(variant_id=VARIANT_A, scan_type="tool", scan_source="grype")
+        db.session.add_all([sbom, old_tool, tool])
+        db.session.flush()
+        tool_doc = SBOMDocument(path="/synthetic/tool.json", source_name="tool.json", format="grype", scan_id=tool.id)
+        db.session.add(tool_doc)
+        db.session.flush()
+        db.session.add_all([
+            SBOMPackage(sbom_document_id=sbom.id, package_id=exact.id),
+            SBOMPackage(sbom_document_id=sbom.id, package_id=alias.id),
+            SBOMPackage(sbom_document_id=tool_doc.id, package_id=alias.id),
+        ])
+        finding = Finding.get_or_create(exact.id, vuln_id)
+        Observation.create(finding.id, tool.id, commit=False)
+        db.session.commit()
+        alias_id, old_tool_id = alias.id, old_tool.id
+
+    rows = client.get(f"/api/vulnerabilities?variant_id={VARIANT_A}&include_outdated={include_outdated}").get_json()
+    row = next(item for item in rows if item["id"] == vuln_id)
+    assert row["packages_current"] == ["synthetic-lib@1", "synthetic-lib@1::Supplier"]
+    advertised = row["assessment_targets_by_variant"]
+    assert advertised == {str(VARIANT_A): ["synthetic-lib@1"]}
+    targets = [
+        {"variant_id": variant_id, "package": package}
+        for variant_id, packages in advertised.items() for package in packages
+    ]
+    payload = {"current_only": True, "assessments": [{"vuln_id": vuln_id, "status": "fixed", "targets": targets}]}
+    result = client.post("/api/assessments/batch", json=payload)
+    assert result.status_code == 200
+    assert result.get_json()["assessments"][0]["targets"] == targets
+
+    with app.app_context():
+        old_finding = Finding.get_or_create(alias_id, vuln_id)
+        Observation.create(old_finding.id, old_tool_id)
+    payload["assessments"][0]["targets"] = [{"variant_id": str(VARIANT_A), "package": "synthetic-lib@1::Supplier"}]
+    rejected = client.post("/api/assessments/batch", json=payload)
+    assert rejected.status_code == 400
+    assert "no longer current" in rejected.get_json()["errors"][0]["error"]
+
+
 def test_current_only_batch_rejects_stale_targets_atomically_but_preserves_legacy_writes(app, client):
     from src.models.assessment import Assessment
     from src.models.scan import Scan

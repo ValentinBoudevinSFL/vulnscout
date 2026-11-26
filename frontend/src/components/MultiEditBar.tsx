@@ -121,7 +121,7 @@ function MultiEditBar ({vulnerabilities, selectedVulns, resetVulns, appendAssess
         const rows = new Map(vulnerabilities.map(vuln => [vuln.id, vuln]));
         const assessmentRequests = selectedVulns.map(vuln_id => ({
             vuln_id,
-            targets: Object.entries(rows.get(vuln_id)?.packages_current_by_variant ?? {})
+            targets: Object.entries(rows.get(vuln_id)?.assessment_targets_by_variant ?? {})
                 .filter(([id]) => !scopedVariants || scopedVariants.includes(id))
                 .flatMap(([variant_id, packages]) => packages.map(packageId => ({ variant_id, package: packageId }))),
             status: content.status,
@@ -178,46 +178,25 @@ function MultiEditBar ({vulnerabilities, selectedVulns, resetVulns, appendAssess
     const saveTimeEstimation = async (content: PostTimeEstimate) => {
         setIsLoading(true);
 
-        // Build variant-scoped updates for every selected vulnerability.
-        const vulnerabilityUpdates: Array<{
-            id: string;
-            variant_id: string;
-            effort: {
-                optimistic: string;
-                likely: string;
-                pessimistic: string;
-            };
-        }> = [];
-
-        if (variantId) {
-            for (const vuln_id of selectedVulns) {
-                vulnerabilityUpdates.push({
-                    id: vuln_id,
-                    variant_id: variantId,
-                    effort: {
-                        optimistic: content.optimistic.formatAsIso8601(),
-                        likely: content.likely.formatAsIso8601(),
-                        pessimistic: content.pessimistic.formatAsIso8601()
-                    }
-                });
+        const effort = {
+            optimistic: content.optimistic.formatAsIso8601(),
+            likely: content.likely.formatAsIso8601(),
+            pessimistic: content.pessimistic.formatAsIso8601(),
+        };
+        const rows = new Map(vulnerabilities.map(vuln => [vuln.id, vuln]));
+        const updatesByVulnerability = await Promise.all(selectedVulns.map(async id => {
+            let targets: string[];
+            if (variantId) {
+                targets = [variantId];
+            } else if (variantIds && variantIds.length >= 2) {
+                targets = rows.get(id)?.effort_variant_ids ?? [];
+            } else {
+                const variants = await Variants.listByVuln(id).catch(() => []);
+                targets = variants.filter(item => !projectId || item.project_id === projectId).map(item => item.id);
             }
-        } else {
-            await Promise.all(selectedVulns.map(async (vuln_id) => {
-                const variants = await Variants.listByVuln(vuln_id).catch(() => []);
-                for (const variant of variants.filter(
-                    item => !projectId || item.project_id === projectId)) {
-                    vulnerabilityUpdates.push({
-                        id: vuln_id,
-                        variant_id: variant.id,
-                        effort: {
-                            optimistic: content.optimistic.formatAsIso8601(),
-                            likely: content.likely.formatAsIso8601(),
-                            pessimistic: content.pessimistic.formatAsIso8601()
-                        }
-                    });
-                }
-            }));
-        }
+            return targets.map(variant_id => ({ id, variant_id, effort }));
+        }));
+        const vulnerabilityUpdates = updatesByVulnerability.flat();
 
         if (vulnerabilityUpdates.length === 0) {
             triggerBanner('No variants found for selected vulnerabilities.', 'error');

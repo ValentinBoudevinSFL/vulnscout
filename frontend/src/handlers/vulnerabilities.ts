@@ -35,6 +35,8 @@ type Vulnerability = {
     packages_current: string[];
     packages_current_by_variant?: Record<string, string[]>;
     packages_status_by_variant?: Record<string, string[]>;
+    assessment_targets_by_variant?: Record<string, string[]>;
+    effort_variant_ids?: string[];
     variants: string[];
     urls: string[];
     cpes?: string[];
@@ -308,6 +310,13 @@ const asVulnerability = (data: any): Vulnerability | [] => {
             ? Object.fromEntries(Object.entries(data.packages_status_by_variant)
                 .map(([variantId, packages]) => [variantId, asStringArray(packages)]))
             : undefined,
+        assessment_targets_by_variant: data?.assessment_targets_by_variant
+            && typeof data.assessment_targets_by_variant === 'object'
+            && !Array.isArray(data.assessment_targets_by_variant)
+            ? Object.fromEntries(Object.entries(data.assessment_targets_by_variant)
+                .map(([variantId, packages]) => [variantId, asStringArray(packages)]))
+            : undefined,
+        effort_variant_ids: Array.isArray(data.effort_variant_ids) ? asStringArray(data.effort_variant_ids) : undefined,
         variants: asStringArray(data?.variants),
         urls: asStringArray(data?.urls),
         cpes: asStringArray(data?.cpes),

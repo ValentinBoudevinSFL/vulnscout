@@ -1117,6 +1117,7 @@ def test_outdated_comparison_recomputes_difference_union_and_intersection(app, c
     from src.models.sbom_observation import SBOMObservation
     from src.models.sbom_package import SBOMPackage
     from src.models.scan import Scan
+    from src.models.time_estimate import TimeEstimate
     from src.models.variant import Variant
     from src.models.vulnerability import Vulnerability
 
@@ -1208,7 +1209,9 @@ def test_outdated_comparison_recomputes_difference_union_and_intersection(app, c
             ("compare_current", "compare_only", "compare"),
             ("third_tool", "shared", "shared"),
             ("sibling_current", "sibling_only", "sibling"),
+            ("sibling_current", "sibling_only", "shared"),
             ("outside_current", "outside", "shared"),
+            ("outside_current", "outside", "base"),
         ]
         for scan_key, package_key, vulnerability_key in observation_specs:
             finding = Finding.get_or_create(
@@ -1229,6 +1232,8 @@ def test_outdated_comparison_recomputes_difference_union_and_intersection(app, c
             ]
         ])
         db.session.commit()
+        foreign_finding = Finding.get_or_create(packages["outside"].id, vulnerabilities["base"].id)
+        TimeEstimate.create(finding_id=foreign_finding.id, variant_id=outside.id, optimistic=1, likely=2, pessimistic=3)
         base_id, compare_id, third_id, project_id = map(
             str, (base.id, compare.id, third.id, project.id),
         )
@@ -1251,17 +1256,21 @@ def test_outdated_comparison_recomputes_difference_union_and_intersection(app, c
     }
 
     multi_base = f"/api/vulnerabilities?variant_ids={base_id},{compare_id},{third_id}"
+    active_union = {
+        row["id"]: row["effort_variant_ids"] for row in client.get(f"{multi_base}&operation=union").get_json()
+    }
+    assert active_union["CVE-OUTDATED-COMPARE-SHARED"] == [compare_id, third_id]
     multi_difference = client.get(
         f"{multi_base}&operation=difference&include_outdated=true"
     )
-    assert {item["id"] for item in multi_difference.get_json()} == {
-        "CVE-OUTDATED-BASE-ONLY",
+    assert {item["id"]: item["effort_variant_ids"] for item in multi_difference.get_json()} == {
+        "CVE-OUTDATED-BASE-ONLY": [base_id],
     }
     multi_union = client.get(f"{multi_base}&operation=union&include_outdated=true")
-    assert {item["id"] for item in multi_union.get_json()} == {
-        "CVE-OUTDATED-COMPARE-SHARED",
-        "CVE-OUTDATED-COMPARE-ONLY",
-        "CVE-OUTDATED-BASE-ONLY",
+    assert {item["id"]: item["effort_variant_ids"] for item in multi_union.get_json()} == {
+        "CVE-OUTDATED-COMPARE-SHARED": [base_id, compare_id, third_id],
+        "CVE-OUTDATED-COMPARE-ONLY": [compare_id],
+        "CVE-OUTDATED-BASE-ONLY": [base_id],
     }
     multi_intersection = client.get(
         f"{multi_base}&operation=intersection&include_outdated=true"
@@ -1269,6 +1278,13 @@ def test_outdated_comparison_recomputes_difference_union_and_intersection(app, c
     assert {item["id"] for item in multi_intersection.get_json()} == {
         "CVE-OUTDATED-COMPARE-SHARED",
     }
+
+    scope = f"project_id={project_id}&include_outdated=true"
+    base_only_id = "CVE-OUTDATED-BASE-ONLY"
+    project_rows = client.get(f"/api/vulnerabilities?{scope}").get_json()
+    project_row = next(row for row in project_rows if row["id"] == base_only_id)
+    project_details = client.get(f"/api/vulnerabilities/{base_only_id}?{scope}").get_json()
+    assert project_row["effort"] == project_details["effort"] == dict.fromkeys(("optimistic", "likely", "pessimistic"))
 
     shared_id = "CVE-OUTDATED-COMPARE-SHARED"
     for scope, expected in (
@@ -1293,7 +1309,8 @@ def test_outdated_comparison_recomputes_difference_union_and_intersection(app, c
         detail = details.get_json()
         rows = client.get(f"/api/vulnerabilities?{scope}&include_outdated=true").get_json()
         scoped_row = next(row for row in rows if row["id"] == shared_id)
-        for key in ("packages", "packages_status_by_variant", "packages_current", "packages_current_by_variant"):
+        for key in ("packages", "packages_status_by_variant", "packages_current", "packages_current_by_variant",
+                    "assessment_targets_by_variant"):
             assert detail[key] == scoped_row[key]
         assert "outside-only@1.0" not in detail["packages"]
         text_contents = {text["content"] for text in detail["texts"]}

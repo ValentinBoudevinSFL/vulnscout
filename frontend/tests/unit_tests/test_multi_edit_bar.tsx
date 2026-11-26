@@ -19,7 +19,7 @@ describe('MultiEditBar', () => {
             datasource: 'test',
             packages: ['pkg1'],
             packages_current: ['pkg1'],
-            packages_current_by_variant: { v1: ['pkg1'] },
+            assessment_targets_by_variant: { v1: ['pkg1'] },
             urls: [],
             texts: [],
             severity: {
@@ -53,7 +53,7 @@ describe('MultiEditBar', () => {
             datasource: 'test',
             packages: ['pkg2'],
             packages_current: ['pkg2'],
-            packages_current_by_variant: { v1: ['pkg2'] },
+            assessment_targets_by_variant: { v1: ['pkg2'] },
             urls: [],
             texts: [],
             severity: {
@@ -327,7 +327,8 @@ describe('MultiEditBar', () => {
             vulnerabilities: [{
                 ...mockVulnerabilities[0],
                 packages: ['pkg@1', 'pkg@2', 'pkg@3'],
-                packages_current_by_variant: { first: ['pkg@2'], second: ['pkg@3'], sibling: ['pkg@1'] },
+                packages_current_by_variant: { first: ['pkg@2', 'pkg@2::Supplier'], second: ['pkg@3'] },
+                assessment_targets_by_variant: { first: ['pkg@2'], second: ['pkg@3'], sibling: ['pkg@1'] },
             }],
             variantIds: ['first', 'second'],
             selectedVulns: ['vuln-1'],
@@ -367,7 +368,7 @@ describe('MultiEditBar', () => {
         const triggerBanner = jest.fn();
         const { getByText } = render(<MultiEditBar
             {...mockProps}
-            vulnerabilities={[{ ...mockVulnerabilities[0], packages_current: [], packages_current_by_variant: {} }]}
+            vulnerabilities={[{ ...mockVulnerabilities[0], packages_current: [], assessment_targets_by_variant: {} }]}
             selectedVulns={['vuln-1']}
             triggerBanner={triggerBanner}
         />);
@@ -436,6 +437,49 @@ describe('MultiEditBar', () => {
         expect(patched.assessments).toEqual(refreshed.assessments);
         expect(patched.effort.optimistic.formatAsIso8601()).toBe('PT1H');
         expect(mockResetVulns).toHaveBeenCalledTimes(1);
+    });
+
+    test.each([
+        ['union', ['first', 'third']],
+        ['difference', ['first']],
+    ])('bulk effort in %s updates only the historical row’s evidence variants', async (operation, evidence) => {
+        const estimates = { first: 'PT1H', second: 'PT1H', third: 'PT1H', sibling: 'PT1H' };
+        fetchMock.mockResponse(async request => {
+            if (request.method !== 'PATCH') {
+                return JSON.stringify(Object.keys(estimates).map(id => ({ id, name: id, project_id: 'p1' })));
+            }
+            const { vulnerabilities } = await request.json() as {
+                vulnerabilities: { variant_id: keyof typeof estimates; effort: { likely: string } }[];
+            };
+            for (const { variant_id, effort } of vulnerabilities) estimates[variant_id] = effort.likely;
+            return JSON.stringify({ status: 'success', vulnerabilities: [], count: vulnerabilities.length });
+        });
+        const triggerBanner = jest.fn();
+        const { getByText, getByPlaceholderText } = render(<MultiEditBar
+            {...mockProps}
+            vulnerabilities={[{
+                ...mockVulnerabilities[0],
+                packages_current_by_variant: {},
+                packages_status_by_variant: { first: ['old@1'], third: ['older@1'] },
+                effort_variant_ids: evidence,
+            }]}
+            selectedVulns={['vuln-1']}
+            projectId="p1"
+            variantIds={['first', 'second', 'third']}
+            multiOperation={operation}
+            triggerBanner={triggerBanner}
+        />);
+        await act(async () => { getByText('Change time estimate').click(); });
+        fireEvent.input(getByPlaceholderText(/shortest estimate/), { target: { value: '1h' } });
+        fireEvent.input(getByPlaceholderText(/balanced estimate/), { target: { value: '2h' } });
+        fireEvent.input(getByPlaceholderText(/longest estimate/), { target: { value: '3h' } });
+        await act(async () => { getByText('Save estimation').click(); });
+
+        expect(triggerBanner).toHaveBeenCalledWith(expect.stringContaining('Successfully updated'), 'success');
+        expect(estimates).toEqual({
+            first: 'PT2H', second: 'PT1H', third: operation === 'union' ? 'PT2H' : 'PT1H', sibling: 'PT1H',
+        });
+        expect(fetchMock).toHaveBeenCalledTimes(1);
     });
 
     test('addAssessment error path: triggers error banner with error details', async () => {
@@ -730,7 +774,7 @@ describe('MultiEditBar', () => {
             ...mockProps,
             vulnerabilities: [{
                 ...mockVulnerabilities[0],
-                packages_current_by_variant: { v1: ['pkg1'], 'v-abc': ['pkg1'] },
+                assessment_targets_by_variant: { v1: ['pkg1'], 'v-abc': ['pkg1'] },
             }],
             selectedVulns: ['vuln-1'],
             variantId: 'v-abc',
@@ -835,7 +879,7 @@ describe('MultiEditBar', () => {
             vulnerabilities: [{
                 ...mockVulnerabilities[0],
                 packages_current: ['pkg1', 'pkg2'],
-                packages_current_by_variant: { 'v-cmp': ['pkg1'], 'v-base': ['pkg2'] },
+                assessment_targets_by_variant: { 'v-cmp': ['pkg1'], 'v-base': ['pkg2'] },
             }],
             selectedVulns: ['vuln-1'],
             variantId: 'v-cmp',

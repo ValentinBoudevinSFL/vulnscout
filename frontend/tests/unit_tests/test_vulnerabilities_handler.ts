@@ -86,6 +86,8 @@ describe('Vulnerabilities parsing CVSS branches', () => {
   test('list opts into outdated vulnerabilities without changing the default query', async () => {
     fetchMock.mockResponseOnce(JSON.stringify([rawVuln({
       packages_status_by_variant: { 'variant-1': ['pkg@1.0.0', 'pkg@2.0.0'] },
+      assessment_targets_by_variant: { 'variant-1': ['pkg@2.0.0'] },
+      effort_variant_ids: ['variant-1'],
     })]));
     const [vuln] = await Vulnerabilities.list(
       'variant-1', undefined, undefined, undefined, undefined, undefined, undefined, true,
@@ -95,6 +97,8 @@ describe('Vulnerabilities parsing CVSS branches', () => {
     expect(vuln.packages_status_by_variant).toEqual({
       'variant-1': ['pkg@1.0.0', 'pkg@2.0.0'],
     });
+    expect(vuln.assessment_targets_by_variant).toEqual({ 'variant-1': ['pkg@2.0.0'] });
+    expect(vuln.effort_variant_ids).toEqual(['variant-1']);
 
     fetchMock.resetMocks();
     fetchMock.mockResponseOnce(JSON.stringify([rawVuln()]));
