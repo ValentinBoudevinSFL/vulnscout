@@ -141,8 +141,13 @@ jest.mock('../../src/pages/Metrics', () => ({
 }));
 jest.mock('../../src/pages/TablePackages', () => ({
     __esModule: true,
-    default: ({ onShowVulns }: { onShowVulns: (packageId: string, ids: string[]) => void }) => (
-        <button onClick={() => onShowVulns('pkg-1', ['CVE-1'])}>show package vulnerabilities</button>
+    default: ({ onShowVulns, includeOutdated }: {
+        onShowVulns: (packageId: string, ids: string[]) => void; includeOutdated: boolean;
+    }) => (
+        <div>
+            <span data-testid="package-evidence-mode">{includeOutdated ? 'historical' : 'current'}</span>
+            <button onClick={() => onShowVulns('pkg-1', ['CVE-1'])}>show package vulnerabilities</button>
+        </div>
     ),
 }));
 // The real table writes the filter props it sees on mount into persisted
@@ -156,13 +161,14 @@ jest.mock('../../src/pages/TableVulnerabilities', () => {
     return {
         __esModule: true,
         mountFilters,
-        default: ({ appendAssessment, appendCVSS, patchVuln, filterLabel, filterValue, vulnerabilities }: {
+        default: ({ appendAssessment, appendCVSS, patchVuln, filterLabel, filterValue, vulnerabilities, includeOutdated }: {
             appendAssessment: (assessment: { id: string }) => void;
             appendCVSS: (id: string, vector: string) => void;
             patchVuln: (id: string, vulnerability: { id: string }) => void;
             filterLabel?: string;
             filterValue?: string;
             vulnerabilities: Array<{ id: string }>;
+            includeOutdated: boolean;
         }) => {
             useEffect(() => {
                 mountFilters.push({ label: filterLabel, value: filterValue });
@@ -172,6 +178,7 @@ jest.mock('../../src/pages/TableVulnerabilities', () => {
                 <span data-testid="vuln-filter-label">{filterLabel ?? ''}</span>
                 <span data-testid="vuln-filter-value">{filterValue ?? ''}</span>
                 <span data-testid="vulnerability-ids">{vulnerabilities.map(v => v.id).join(',')}</span>
+                <span data-testid="vulnerability-evidence-mode">{includeOutdated ? 'historical' : 'current'}</span>
                 <button onClick={() => appendAssessment({ id: 'assessment-1' })}>append assessment</button>
                 <button onClick={() => void mockSaveAssessment().then(appendAssessment)}>save assessment</button>
                 <button onClick={() => void mockSaveAssessment().then(row => patchVuln(row.id, row))}>save full row</button>
@@ -396,6 +403,35 @@ describe('Explorer saved-scope validation', () => {
             op_id: 'scan:grype:variant-1', kind: 'scan', status: 'done',
         });
         await waitFor(() => expect(mockVulnerabilitiesList.mock.calls.length).toBeGreaterThan(initialCalls));
+    });
+
+    test('uses one evidence mode across SBOM and chart drill-down in the selected comparison', async () => {
+        mockGetFrontendScope.mockReturnValue(null);
+        render(<MemoryRouter initialEntries={[ROUTES.metrics]}><Explorer /></MemoryRouter>);
+        await waitFor(() => expect(screen.getByRole('button', { name: 'Show Outdated' })).toBeEnabled());
+        expect(screen.getByText('Current exposure and SBOM inventory')).toBeVisible();
+        fireEvent.click(screen.getByRole('button', { name: 'apply compare scope' }));
+        await waitFor(() => expect(mockVulnerabilitiesList).toHaveBeenLastCalledWith(
+            'v9', 'p2', 'v10', 'difference', undefined, undefined, expect.any(AbortSignal),
+        ));
+        await waitFor(() => expect(screen.getByRole('button', { name: 'Show Outdated' })).toBeEnabled());
+        fireEvent.click(screen.getByRole('button', { name: 'Show Outdated' }));
+        expect(await screen.findByText('Ever observed in the selected scope')).toBeVisible();
+        expect(mockVulnerabilitiesList).toHaveBeenLastCalledWith(
+            'v9', 'p2', 'v10', 'difference', undefined, undefined, expect.any(AbortSignal), true,
+        );
+        expect(mockPackagesList).toHaveBeenLastCalledWith(
+            'v9', 'p2', 'v10', 'difference', undefined, undefined, true, expect.any(AbortSignal),
+        );
+        fireEvent.click(screen.getByRole('link', { name: 'packages' }));
+        expect(screen.getByTestId('package-evidence-mode')).toHaveTextContent('historical');
+        fireEvent.click(screen.getByRole('link', { name: 'metrics' }));
+        fireEvent.click(screen.getByRole('button', { name: 'filter vulnerabilities' }));
+        expect(screen.getByTestId('vuln-filter-label')).toHaveTextContent('Severity');
+        expect(screen.getByTestId('vulnerability-evidence-mode')).toHaveTextContent('historical');
+        fireEvent.click(screen.getByRole('button', { name: 'Hide Outdated' }));
+        await waitFor(() => expect(screen.getByTestId('vulnerability-evidence-mode')).toHaveTextContent('current'));
+        expect(screen.getByTestId('vuln-filter-label')).toHaveTextContent('Severity');
     });
 
     test.each(['done', 'error', 'cancelled'] as const)(

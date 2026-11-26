@@ -17,6 +17,7 @@ import Vulnerabilities from "../handlers/vulnerabilities";
 import TablePackages from "./TablePackages";
 import TableVulnerabilities from "./TableVulnerabilities";
 import Metrics from "./Metrics";
+import ToggleSwitch from "../components/ToggleSwitch";
 import Exports from "./Exports";
 import ScanHistory from "./ScanHistory";
 import RefreshOverview from "./RefreshOverview";
@@ -69,8 +70,11 @@ function Explorer() {
     const [listedPackages, setListedPackages] = useState<Package[]>([]);
     const [dataRevision, setDataRevision] = useState(0);
     const [vulns, setVulns] = useState<Vulnerability[]>([]);
+    const [currentVulns, setCurrentVulns] = useState<Vulnerability[]>([]);
+    const [includeOutdated, setIncludeOutdated] = useState(false);
+    const requestedHistorical = useRef(false);
+    const installedHistorical = useRef(false);
     const pkgs = useMemo(() => Packages.enrich_with_vulns(listedPackages, vulns), [listedPackages, vulns]);
-    const vulnsRef = useRef<Vulnerability[]>([]);
     const location = useLocation();
     const navigate = useNavigate();
     const [bannerMessage, setBannerMessage] = useState<string>('');
@@ -188,14 +192,17 @@ function Explorer() {
         const controller = new AbortController();
         loadController.current = controller;
         const { signal } = controller;
+        const historical = requestedHistorical.current;
         if (!background) setIsLoadingData(true);
 
         const multiActive = !!(variantIds && variantIds.length >= 2);
+        const current = Vulnerabilities.list(variantId, projectId, compareVariantId, operation, variantIds, multiOperation, signal);
         return Promise.allSettled([
-            Packages.list(variantId, projectId, compareVariantId, operation, variantIds, multiOperation, false, signal),
-            Vulnerabilities.list(variantId, projectId, compareVariantId, operation, variantIds, multiOperation, signal),
-        ]).then(async ([pkgsResult, vulnsResult]) => {
-            if (pkgsResult.status === 'rejected' || vulnsResult.status === 'rejected') {
+            Packages.list(variantId, projectId, compareVariantId, operation, variantIds, multiOperation, historical, signal),
+            historical ? Vulnerabilities.list(variantId, projectId, compareVariantId, operation, variantIds, multiOperation, signal, true) : current,
+            current,
+        ]).then(async ([pkgsResult, vulnsResult, currentResult]) => {
+            if (pkgsResult.status === 'rejected' || vulnsResult.status === 'rejected' || currentResult.status === 'rejected') {
                 throw new Error("Failed to load packages or vulnerabilities");
             }
             let assessments: Assessment[];
@@ -217,22 +224,31 @@ function Explorer() {
             if (generation !== loadGeneration.current || signal.aborted) return;
             // A user edit may have completed after these reads started. Do not overwrite
             // it with their older snapshot; reread the current scope instead.
-            if (background && localRevision !== localDataRevision.current) {
-                return loadData(variantId, projectId, compareVariantId, operation, variantIds, multiOperation, true);
+            if (localRevision !== localDataRevision.current) {
+                return loadData(variantId, projectId, compareVariantId, operation, variantIds, multiOperation, background);
             }
             setIsLoadingData(false);
             setLoadingMessage("Loading data...");
             const enriched_vulns = Vulnerabilities.enrich_with_assessments(vulnsResult.value, assessments);
             setVulns(enriched_vulns);
+            setCurrentVulns(historical ? Vulnerabilities.enrich_with_assessments(currentResult.value, assessments) : enriched_vulns);
+            installedHistorical.current = historical;
+            setIncludeOutdated(historical);
             setListedPackages(pkgsResult.value);
             setDataRevision(++installedRevision.current);
         }).catch(error => {
             if (generation !== loadGeneration.current || signal.aborted) return;
             controller.abort();
             console.error(error);
+            if (historical && installedHistorical.current) {
+                requestedHistorical.current = false;
+                triggerBanner("Failed to refresh historical evidence; loading current results", "error");
+                return loadData(variantId, projectId, compareVariantId, operation, variantIds, multiOperation);
+            }
+            requestedHistorical.current = installedHistorical.current;
             setIsLoadingData(false);
             setLoadingMessage("Loading data...");
-            triggerBanner("Failed to load data", "error");
+            triggerBanner(historical ? "Failed to load historical evidence" : "Failed to load data", "error");
         }).finally(() => {
             if (loadController.current === controller) loadController.current = null;
         });
@@ -283,8 +299,8 @@ function Explorer() {
                 const compareActive = scope?.mode === 'compare';
                 const variantId = compareActive
                     ? scope?.compare_base_id
-                    : scope?.mode === 'select' && scope.variant_ids.length === 1
-                        ? scope.variant_ids[0]
+                    : scope?.mode === 'select'
+                        ? (scope.variant_ids.length === 1 ? scope.variant_ids[0] : undefined)
                         : config.variant?.id || undefined;
                 const projectId = scope?.project_id || config.project?.id || undefined;
                 const compareVariantId = compareActive ? scope?.compare_variant_id : undefined;
@@ -297,7 +313,7 @@ function Explorer() {
                 scopeReady.current = true;
                 loadData(
                     multiActive ? undefined : variantId,
-                    (multiActive || !variantId) ? projectId : undefined,
+                    (multiActive || compareActive || !variantId) ? projectId : undefined,
                     compareVariantId,
                     compareActive ? scope?.compare_operation : undefined,
                     multiActive ? scope?.variant_ids : undefined,
@@ -320,6 +336,9 @@ function Explorer() {
         // but not the URL query (e.g. the exact run identity of /refresh?run=…).
         navigate({ pathname: location.pathname, search: location.search }, { replace: true, state: null });
         setScopeRevision(++activeScopeRevision.current);
+        setVulns([]);
+        setCurrentVulns([]);
+        setListedPackages([]);
         setCurrentVariantId(effectiveVariantId);
         setCurrentProjectId(projectId || undefined);
         // Track origin variant and operation separately for MultiEditBar intersection logic
@@ -343,7 +362,7 @@ function Explorer() {
         }
         loadData(
             multiActive ? undefined : (variantId || undefined),
-            (multiActive || !variantId) ? (projectId || undefined) : undefined,
+            (multiActive || compareVariantId || !variantId) ? (projectId || undefined) : undefined,
             multiActive ? undefined : (compareVariantId || undefined),
             multiActive ? undefined : (operation || undefined),
             multiActive ? variantIds : undefined,
@@ -378,21 +397,22 @@ function Explorer() {
         return { projectId: currentProjectId, variantIds: wholeProject ? undefined : (currentVariantIds ?? pairOrSingle), revision };
     }, [frontendScope, scopeRevision, currentProjectId, currentVariantId, currentBaseVariantId, currentVariantIds]);
 
+    const loadSelectedScope = useCallback((background = false) => loadData(
+        currentBaseVariantId ?? currentVariantId, (!currentVariantId || currentBaseVariantId) ? currentProjectId : undefined,
+        currentBaseVariantId ? currentVariantId : undefined, currentOperation, currentVariantIds, currentMultiOperation,
+        background,
+    ), [loadData, currentBaseVariantId, currentVariantId, currentProjectId, currentOperation, currentVariantIds, currentMultiOperation]);
     const handleScanComplete = useCallback(() => {
-        loadData(currentBaseVariantId ?? currentVariantId, currentVariantId ? undefined : currentProjectId,
-            currentBaseVariantId ? currentVariantId : undefined, currentOperation, currentVariantIds, currentMultiOperation);
-    }, [loadData, currentBaseVariantId, currentVariantId, currentProjectId, currentOperation, currentVariantIds, currentMultiOperation]);
-
+        void loadSelectedScope();
+    }, [loadSelectedScope]);
     const handleRefreshComplete = useCallback(() => {
-        loadData(currentBaseVariantId ?? currentVariantId, currentVariantId ? undefined : currentProjectId,
-            currentBaseVariantId ? currentVariantId : undefined, currentOperation, currentVariantIds, currentMultiOperation);
-    }, [loadData, currentBaseVariantId, currentVariantId, currentProjectId, currentOperation, currentVariantIds, currentMultiOperation]);
+        void loadSelectedScope();
+    }, [loadSelectedScope]);
 
     // Agent writes refresh in the background; a scope change aborts and replaces that reload.
     useAgentWriteRefresh((_, announcedRevision) => Promise.all([
         scopeReady.current && announcedRevision === activeScopeRevision.current
-            ? loadData(currentBaseVariantId ?? currentVariantId, currentVariantId ? undefined : currentProjectId,
-                currentBaseVariantId ? currentVariantId : undefined, currentOperation, currentVariantIds, currentMultiOperation, true)
+            ? loadSelectedScope(true)
             : undefined,
         loadSetupRequirement(),
     ]), { revision: activeScopeRevision });
@@ -434,16 +454,11 @@ function Explorer() {
         return null;
     }
 
-    // Keep vulnsRef in sync when vulns state is updated externally
-    // (e.g. after loadData or appendAssessment).
-    useEffect(() => { vulnsRef.current = vulns; }, [vulns]);
-
     function patchVuln(vulnId: string, patch: VulnerabilityPatch) {
         if (scopeRevision !== activeScopeRevision.current) return;
         if (typeof patch !== 'function' && dataRevision !== installedRevision.current) {
             // A full modal row from before the reload cannot safely be merged.
-            void loadData(currentBaseVariantId ?? currentVariantId, currentVariantId ? undefined : currentProjectId,
-                currentBaseVariantId ? currentVariantId : undefined, currentOperation, currentVariantIds, currentMultiOperation, true);
+            void loadSelectedScope(true);
             return;
         }
         mutateVulns(latest => latest.map(v => v.id !== vulnId ? v : typeof patch === 'function' ? patch(v) : patch));
@@ -490,20 +505,10 @@ function Explorer() {
         navigate(ROUTES.vulnerabilities, { state });
     }
 
-    const loadOutdatedPackages = useCallback(async () => {
-        const baseVariantId = currentBaseVariantId ?? currentVariantId;
-        const compareVariantId = currentBaseVariantId ? currentVariantId : undefined;
-        const loaded = await Packages.list(
-            baseVariantId,
-            baseVariantId ? undefined : currentProjectId,
-            compareVariantId,
-            currentOperation,
-            currentVariantIds,
-            currentMultiOperation,
-            true,
-        );
-        return Packages.enrich_with_vulns(loaded, vulnsRef.current);
-    }, [currentBaseVariantId, currentVariantId, currentProjectId, currentOperation, currentVariantIds, currentMultiOperation]);
+    function changeEvidenceMode(historical: boolean) {
+        requestedHistorical.current = historical;
+        void loadSelectedScope();
+    }
     const tablePreferenceScopeKey = [
         currentProjectId ?? '',
         currentBaseVariantId ?? '',
@@ -512,10 +517,7 @@ function Explorer() {
         currentMultiOperation,
         ...(currentVariantIds ?? []),
     ].join(':');
-    const outdatedPackagesScopeKey = tablePreferenceScopeKey;
-    const hasOutdatedPackagesScope = Boolean(
-        currentProjectId || currentVariantId || (currentVariantIds?.length ?? 0) > 0
-    );
+    const evidenceKey = `${tablePreferenceScopeKey}:${includeOutdated}`;
 
     function showVulnsForPackage(packageId: string, matchingVulnerabilityIds?: string[]) {
         goToVulnsTabWithFilter("Package", packageId, matchingVulnerabilityIds);
@@ -700,25 +702,40 @@ function Explorer() {
             )}
 
             <div className="p-5 flex-1 overflow-auto">
+                {(tab === 'metrics' || tab === 'packages' || tab === 'vulnerabilities') && (
+                    <div className="mb-3 flex items-center gap-3 text-sm text-gray-200">
+                        <ToggleSwitch enabled={includeOutdated} setEnabled={changeEvidenceMode}
+                            disabled={isLoadingData} label="Outdated" />
+                        <span>{includeOutdated ? 'Ever observed in the selected scope' : 'Current exposure and SBOM inventory'}</span>
+                    </div>
+                )}
                 <Routes>
                 <Route path={ROUTES.metrics} element={
                     <Metrics
+                        key={evidenceKey}
                         packages={pkgs}
                         vulnerabilities={vulns}
+                        includeOutdated={includeOutdated}
                         goToVulnsTabWithFilter={goToVulnsTabWithFilter}
                         appendAssessment={appendAssessment}
                         patchVuln={patchVuln}
                         setTab={handleTabChange}
                         appendCVSS={appendCVSS}
                         projectId={currentProjectId}
+                        variantId={currentVariantId}
+                        baseVariantId={currentBaseVariantId}
+                        compareOperation={currentOperation}
+                        variantIds={currentVariantIds}
+                        multiOperation={currentMultiOperation}
                         onAgentContextChange={setMetricsAgentView}
                     />
                 } />
                 <Route path={ROUTES.packages} element={
                     <TablePackages
-                        key={tablePreferenceScopeKey}
+                        key={evidenceKey}
                         packages={pkgs}
                         vulnerabilities={vulns}
+                        includeOutdated={includeOutdated}
                         preferenceScopeKey={tablePreferenceScopeKey}
                         onAgentContextChange={setPackagesAgentView}
                         onShowVulns={showVulnsForPackage}
@@ -728,17 +745,16 @@ function Explorer() {
                         compareVariantId={currentBaseVariantId ? currentVariantId : undefined}
                         operation={currentBaseVariantId ? currentOperation : currentMultiOperation}
                         dataRevision={dataRevision}
-                        onLoadOutdatedPackages={hasOutdatedPackagesScope ? loadOutdatedPackages : undefined}
-                        outdatedScopeKey={outdatedPackagesScopeKey}
                     />
                 } />
                 <Route path={ROUTES.vulnerabilities} element={
                     <TableVulnerabilities
-                        key={tablePreferenceScopeKey}
+                        key={evidenceKey}
                         appendAssessment={appendAssessment}
                         appendCVSS={appendCVSS}
                         patchVuln={patchVuln}
                         vulnerabilities={vulns}
+                        includeOutdated={includeOutdated}
                         dataRevision={dataRevision}
                         preferenceScopeKey={tablePreferenceScopeKey}
                         filterLabel={vulnFilter?.label}
@@ -768,7 +784,7 @@ function Explorer() {
                 } />
                 <Route path={ROUTES.refresh} element={
                     <RefreshOverview key={`${currentProjectId}-${currentVariantId}`} projectId={currentProjectId} variantId={currentVariantId}
-                        vulnerabilities={vulns}
+                        vulnerabilities={includeOutdated ? currentVulns : vulns}
                         baseVariantId={currentBaseVariantId} compareOperation={currentOperation}
                         variantIds={currentVariantIds} multiOperation={currentMultiOperation}
                         comparisonScope={!!currentBaseVariantId || (currentVariantIds?.length ?? 0) > 1} dataRevision={dataRevision} />
@@ -785,7 +801,7 @@ function Explorer() {
                         Config.get().then(config => setDefaultConfig(config)).catch(() => {});
                         loadSetupRequirement();
                         setSelectorKey(k => k + 1);
-                        loadData(currentVariantId, currentVariantId ? undefined : currentProjectId, undefined, undefined, currentVariantIds, currentMultiOperation);
+                        void loadSelectedScope();
                     }} projectId={currentProjectId} onLoadingMessage={(msg) => {
                         if (msg) {
                             setLoadingMessage(msg);

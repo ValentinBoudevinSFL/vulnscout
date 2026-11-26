@@ -136,7 +136,7 @@ SCHEMAS: dict[str, Any] = {
             "source": {"type": "string", "enum": ["sbom", "purl", "cpe", "download"]},
         }, ("version", "identifier", "source"))),
         "variants": _STRINGS, "sources": _STRINGS, "sbom_documents": _STRINGS,
-        "outdated": _BOOL, "variant_id": _UUID, "finding_ids": _UUIDS,
+        "outdated": _BOOL, "variant_id": _UUID, "inventory_variant_ids": _UUIDS, "finding_ids": _UUIDS,
         "vulnerability_ids": _VULNS,
     }, ("id", "name", "version")),
     "PackageCollection": {

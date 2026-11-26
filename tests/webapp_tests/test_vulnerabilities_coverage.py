@@ -1105,6 +1105,123 @@ def test_vulnerabilities_include_outdated_is_opt_in_and_scoped(app, client):
     assert "CVE-OUTDATED-SIBLING-0001" in project_ids
 
 
+def test_explorer_evidence_agrees_across_findings_packages_search_and_writes(app, client):
+    from datetime import datetime, timezone
+    from src.extensions import db
+    from src.models import Finding, Observation, Package, Project, SBOMDocument, SBOMObservation, SBOMPackage
+    from src.models import Scan, Variant, Vulnerability
+
+    removed_id, retained_id = "CVE-SYNTH-REMOVED", "CVE-SYNTH-RETAINED"
+    tool_old_id, tool_id = "CVE-SYNTH-TOOL-OLD", "CVE-SYNTH-TOOL"
+
+    with app.app_context():
+        project = Project.create("Shared evidence test")
+        base = Variant.create("Board A", project.id)
+        sibling = Variant.create("Board B", project.id)
+        tool = Variant.create("Tool-only board", project.id)
+        removed = Package.find_or_create("synthetic-removed", "1")
+        retained = Package.find_or_create("synthetic-retained", "1")
+        for vuln_id in (removed_id, retained_id, tool_old_id, tool_id):
+            Vulnerability.create_record(vuln_id)
+        removed_finding = Finding.get_or_create(removed.id, removed_id)
+        retained_finding = Finding.get_or_create(retained.id, retained_id)
+        tool_old_finding = Finding.get_or_create(removed.id, tool_old_id)
+        tool_finding = Finding.get_or_create(removed.id, tool_id)
+
+        def sbom(variant, day, packages, findings):
+            scan = Scan(variant_id=variant.id, timestamp=datetime(2026, 1, day, tzinfo=timezone.utc))
+            db.session.add(scan)
+            db.session.flush()
+            doc = SBOMDocument(scan_id=scan.id, path=f"/synthetic/{day}.json", source_name=f"{day}.json", format="cdx")
+            db.session.add(doc)
+            db.session.flush()
+            for package in packages:
+                db.session.add(SBOMPackage(sbom_document_id=doc.id, package_id=package.id))
+            for finding in findings:
+                db.session.add(Observation(scan_id=scan.id, finding_id=finding.id))
+                db.session.add(SBOMObservation(
+                    sbom_document_id=doc.id, vulnerability_id=finding.vulnerability_id, package_id=finding.package_id,
+                    key="test description", description=f"synthetic evidence day {day}",
+                ))
+
+        sbom(base, 1, [removed, retained], [removed_finding, retained_finding])
+        sbom(base, 2, [retained], [])
+        sbom(sibling, 3, [retained], [retained_finding])
+        for day, finding in ((1, tool_old_finding), (2, tool_finding)):
+            tool_scan = Scan(
+                variant_id=tool.id, timestamp=datetime(2026, 1, day, tzinfo=timezone.utc),
+                scan_type="tool", scan_source="osv",
+            )
+            db.session.add(tool_scan)
+            db.session.flush()
+            db.session.add(Observation(scan_id=tool_scan.id, finding_id=finding.id))
+        db.session.commit()
+        project_id, base_id, sibling_id, tool_variant_id = map(str, (project.id, base.id, sibling.id, tool.id))
+
+    def rows(path, query):
+        response = client.get(f"/api/{path}?{query}")
+        assert response.status_code == 200
+        return {row["id"]: row for row in response.get_json()}
+
+    current = f"project_id={project_id}"
+    historical = f"{current}&include_outdated=true"
+    assert set(rows("vulnerabilities", current)) == {retained_id, tool_id}
+    history = rows("vulnerabilities", historical)
+    assert set(history) == {removed_id, retained_id, tool_old_id, tool_id}
+    shared = history[retained_id]
+    assert shared["packages_current_by_variant"] == {sibling_id: ["synthetic-retained@1"]}
+    assert shared["assessment_targets_by_variant"] == shared["packages_current_by_variant"]
+    assert shared["packages_status_by_variant"] == {
+        base_id: ["synthetic-retained@1"], sibling_id: ["synthetic-retained@1"],
+    }
+    assert history[removed_id]["assessment_targets_by_variant"] == {}
+    assert history[tool_id]["packages_current_by_variant"] == {tool_variant_id: ["synthetic-removed@1"]}
+    assert history[tool_old_id]["packages_current"] == []
+    assert {removed_id, tool_old_id}.isdisjoint(rows("vulnerabilities", ""))
+    assert {retained_id, tool_id}.issubset(rows("vulnerabilities", ""))
+
+    for query, historical_view in ((current, False), (historical, True)):
+        inventory = rows("packages", query)
+        assert inventory["synthetic-retained@1"]["outdated"] is False
+        assert inventory["synthetic-retained@1"]["inventory_variant_ids"] == sorted([base_id, sibling_id])
+        assert ("synthetic-removed@1" in inventory) == historical_view
+        if historical_view:
+            assert inventory["synthetic-removed@1"]["inventory_variant_ids"] == [base_id]
+            assert inventory["synthetic-removed@1"]["outdated"] is True
+        detail = client.get(f"/api/vulnerabilities/{retained_id}?{query}").get_json()
+        assert detail == {**rows("vulnerabilities", query)[retained_id], "description": detail["description"]}
+        texts = {text["content"] for text in detail["texts"]}
+        matches = client.post(f"/api/vulnerabilities/search-descriptions?{query}", json={
+            "vulnerability_ids": [retained_id, removed_id], "terms": ["day 1", "day 3"],
+        }).get_json()["matches"]
+        assert ("synthetic evidence day 1" in texts) == historical_view
+        assert "synthetic evidence day 3" in texts
+        assert matches == {"day 1": sorted([removed_id, retained_id]) if historical_view else [], "day 3": [retained_id]}
+
+    pair = f"variant_id={base_id}&compare_variant_id={sibling_id}"
+    assert set(rows("vulnerabilities", pair)) == {retained_id}
+    assert not rows("vulnerabilities", f"{pair}&include_outdated=true")
+    multi = f"variant_ids={base_id},{sibling_id},{tool_variant_id}&operation=difference"
+    assert not rows("vulnerabilities", multi)
+    assert set(rows("vulnerabilities", f"{multi}&include_outdated=true")) == {removed_id}
+    assert set(rows("packages", f"{multi}&include_outdated=true")) == {"synthetic-removed@1"}
+    assert not rows("packages", f"variant_id={tool_variant_id}&include_outdated=true")
+
+    editor = client.get(f"/api/vulnerabilities/{retained_id}/variant-active-packages?{current}").get_json()
+    targets = {row["variant_id"]: row for row in editor}
+    assert targets[base_id]["active_packages"] == []
+    assert targets[base_id]["findings"][0]["outdated"] is True
+    assert targets[sibling_id]["active_packages"] == ["synthetic-retained@1"]
+    assert targets[sibling_id]["findings"][0]["outdated"] is False
+
+    batch = {"assessments": [{
+        "vuln_id": retained_id, "status": "fixed",
+        "targets": [{"variant_id": base_id, "package": "synthetic-retained@1"}],
+    }]}
+    assert client.post("/api/assessments/batch", json={**batch, "current_only": True}).status_code == 400
+    assert client.post("/api/assessments/batch", json=batch).status_code == 200
+
+
 def test_outdated_comparison_recomputes_difference_union_and_intersection(app, client):
     from datetime import datetime, timezone
 
@@ -1735,7 +1852,7 @@ def test_populate_found_by_handles_non_string_doc_formats(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_found_by_spdx_format(app, client):
-    """When earliest scan has an SPDX SBOMDocument, found_by should contain 'spdx3'."""
+    """An active SPDX SBOMDocument contributes 'spdx3' provenance."""
     from src.extensions import db
     from src.models.scan import Scan
     from src.models.sbom_document import SBOMDocument
@@ -1763,7 +1880,7 @@ def test_found_by_spdx_format(app, client):
         scan = Scan(
             id=_uuid.uuid4(),
             variant_id=_uuid.UUID("22222222-2222-2222-2222-222222222222"),
-            timestamp=datetime(2020, 1, 1, tzinfo=timezone.utc),
+            timestamp=datetime(2099, 1, 1, tzinfo=timezone.utc),
         )
         db.session.add(scan)
         spdx_doc = SBOMDocument(
@@ -1787,13 +1904,14 @@ def test_found_by_spdx_format(app, client):
 
 
 def test_found_by_tool_scan_nvd(app, client):
-    """When earliest scan is a tool scan with scan_source='nvd', found_by should contain 'nvd_cpe'."""
+    """An active NVD tool scan in a variant without an SBOM contributes provenance."""
     from src.extensions import db
     from src.models.scan import Scan
     from src.models.observation import Observation
     from src.models.finding import Finding
     from src.models.package import Package
     from src.models.vulnerability import Vulnerability
+    from src.models.variant import Variant
     from datetime import datetime, timezone
 
     with app.app_context():
@@ -1808,9 +1926,11 @@ def test_found_by_tool_scan_nvd(app, client):
         finding = Finding.get_or_create(pkg.id, "CVE-NVD-0001")
 
         import uuid as _uuid
+        existing_variant = db.session.get(Variant, _uuid.UUID("22222222-2222-2222-2222-222222222222"))
+        tool_variant = Variant.create("NVD-only provenance", existing_variant.project_id)
         scan = Scan(
             id=_uuid.uuid4(),
-            variant_id=_uuid.UUID("22222222-2222-2222-2222-222222222222"),
+            variant_id=tool_variant.id,
             scan_type="tool",
             scan_source="nvd",
             timestamp=datetime(2019, 1, 1, tzinfo=timezone.utc),
@@ -1855,7 +1975,7 @@ def test_found_by_mixed_formats_reports_all(app, client):
         scan = Scan(
             id=_uuid.uuid4(),
             variant_id=_uuid.UUID("22222222-2222-2222-2222-222222222222"),
-            timestamp=datetime(2018, 1, 1, tzinfo=timezone.utc),
+            timestamp=datetime(2099, 1, 1, tzinfo=timezone.utc),
         )
         db.session.add(scan)
         # Two docs in the same scan: spdx + grype
@@ -1911,7 +2031,7 @@ def test_found_by_yocto_cve_check_mapping(app, client):
         scan = Scan(
             id=_uuid.uuid4(),
             variant_id=_uuid.UUID("22222222-2222-2222-2222-222222222222"),
-            timestamp=datetime(2016, 1, 1, tzinfo=timezone.utc),
+            timestamp=datetime(2099, 1, 1, tzinfo=timezone.utc),
         )
         db.session.add(scan)
         yocto_doc = SBOMDocument(

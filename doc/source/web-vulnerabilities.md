@@ -41,9 +41,18 @@ VulnScout provides several filter categories, each accessible from a dedicated d
   - **EPSS Range**: a percentage-based range slider that narrows the list to vulnerabilities whose Exploit Prediction Scoring System score falls within the specified band.
   - **Attack Vector**: checkboxes for Network, Adjacent, Local, and Physical, reflecting the CVSS attack-vector metric.
   - **First Scan Date**: multi-select by scan timestamp, useful for identifying which vulnerabilities appeared in a particular import run.
-- **Outdated**: a separate toolbar switch, off by default. When enabled, also includes vulnerabilities from superseded SBOM package versions and includes their package-target statuses in the Status column. Results, description search, hover text, and SBOM descriptions and packages in vulnerability details follow the selected variant, project, or comparison scope. Bulk status changes reject the entire batch if any selected package target is no longer current. Turning off Outdated removes historical-only rows from the selection. If historical results fail to refresh, the table returns to current results.
+- **Outdated**: the shared Explorer switch starts off and keeps its setting when
+  you move between Vulnerabilities, SBOM, and Metrics. When enabled, results
+  include findings ever observed in the selected scope. A finding can be
+  historical even when the same package version is still installed, or the
+  same CVE and package are still current in a sibling variant. Description
+  search, hover, details, and statuses follow the selected mode and comparison
+  scope. Bulk status changes still require exact current targets and reject
+  the entire batch if one is no longer current. Deliberate historical edits
+  remain available in the assessment editor.
 
-Active filter dropdowns show a small checkmark; the **Outdated** switch shows its own on/off state. **Reset Filters** clears everything back to defaults.
+Active filter dropdowns show a small checkmark. **Reset Filters** clears the
+table filters without changing the shared **Outdated** switch.
 
 ## Row Selection and Bulk Editing
 

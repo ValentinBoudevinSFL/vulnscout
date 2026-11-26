@@ -2649,6 +2649,42 @@ describe('Vulnerability Modal', () => {
         }));
     });
 
+    test('separates a retained package’s historical finding from its sibling’s current finding', async () => {
+        const pkg = 'retained@1';
+        const findings = {
+            ...vulnerability,
+            packages: [pkg],
+            packages_current: [pkg],
+            packages_current_by_variant: { 'var-2': [pkg] },
+            packages_status_by_variant: { 'var-1': [pkg], 'var-2': [pkg] },
+        };
+        fetchMock.mockResponse(async request => {
+            const { pathname } = new URL(request.url);
+            if (pathname.endsWith('/variants')) return JSON.stringify([
+                { id: 'var-1', name: 'Historical board', project_id: 'proj1' },
+                { id: 'var-2', name: 'Current board', project_id: 'proj1' },
+                { id: 'var-3', name: 'Excluded board', project_id: 'proj1' },
+            ]);
+            if (pathname.endsWith('/variant-active-packages')) return JSON.stringify(
+                ['var-1', 'var-2', 'var-3'].map(variant_id => ({ variant_id, active_packages: [pkg] })),
+            );
+            return JSON.stringify([]);
+        });
+        const view = (includeOutdated: boolean) => <VulnModal vuln={findings} includeOutdated={includeOutdated}
+            projectId="proj1" onClose={() => {}} appendAssessment={() => {}} appendCVSS={() => null} patchVuln={() => {}} />;
+        const { rerender } = render(view(false));
+        const current = (await screen.findByText('Assessments on current findings')).parentElement!;
+        expect(within(current).getByText('Current board')).toBeVisible();
+        expect(within(current).queryByText('Historical board')).not.toBeInTheDocument();
+        expect(screen.queryByText('Assessments on historical findings')).not.toBeInTheDocument();
+
+        rerender(view(true));
+        const historical = (await screen.findByText('Assessments on historical findings')).parentElement!;
+        expect(within(historical).getByText('Historical board')).toBeVisible();
+        expect(within(historical).queryByText('Current board')).not.toBeInTheDocument();
+        expect(screen.queryByText('Excluded board')).not.toBeInTheDocument();
+    });
+
     test('breaks down the current status by variant and package', async () => {
         fetchMock.resetMocks();
         fetchMock.mockResponseOnce(JSON.stringify({})); // reviews mount fetch

@@ -11,7 +11,7 @@ import userEvent from '@testing-library/user-event';
 import "@testing-library/jest-dom";
 import React from 'react';
 
-import Vulnerabilities, { type Vulnerability, type VulnerabilityPatch } from "../../src/handlers/vulnerabilities";
+import Vulnerabilities, { type Vulnerability } from "../../src/handlers/vulnerabilities";
 import TableVulnerabilities from '../../src/pages/TableVulnerabilities';
 import Iso8601Duration from '../../src/handlers/iso8601duration';
 import { __reset, __setEventSourceFactory } from '../../src/handlers/operationStore';
@@ -334,211 +334,6 @@ describe('Vulnerability Table', () => {
         expect(source_header).toBeInTheDocument();
     })
 
-    test('Outdated filter starts off and requests scoped historical vulnerabilities when enabled', async () => {
-        fetchMock.mockResponse(JSON.stringify([]));
-        render(
-            <TableVulnerabilities
-                vulnerabilities={[]}
-                variantId="variant-1"
-                appendAssessment={() => {}}
-                appendCVSS={() => null}
-                patchVuln={() => {}}
-            />,
-        );
-        const user = userEvent.setup();
-        const outdatedSwitch = screen.getByRole('button', { name: 'Show Outdated', pressed: false });
-
-        const requestCountBeforeToggle = fetchMock.mock.calls.length;
-
-        await user.click(outdatedSwitch);
-        await screen.findByRole('button', { name: 'Hide Outdated', pressed: true });
-
-        expect(fetchMock.mock.calls.length).toBeGreaterThan(requestCountBeforeToggle);
-        const vulnerabilityRequest = fetchMock.mock.calls
-            .map(([url]) => new URL(url as string))
-            .find(url => url.pathname === '/api/vulnerabilities');
-        expect(vulnerabilityRequest?.searchParams.get('variant_id')).toBe('variant-1');
-        expect(vulnerabilityRequest?.searchParams.get('include_outdated')).toBe('true');
-    });
-
-    test.each(['toggle', 'reset'])('%s to current rows drops historical bulk selections', async action => {
-        const current = vulnerabilities[0];
-        const historical = { ...vulnerabilities[1], id: 'CVE-HISTORICAL-ONLY' };
-        fetchMock.mockResponse(async request => JSON.stringify(
-            new URL(request.url).pathname === '/api/vulnerabilities' ? [current, historical] : [],
-        ));
-        render(<TableVulnerabilities
-            vulnerabilities={[current]}
-            variantId="variant-1"
-            appendAssessment={() => {}}
-            appendCVSS={() => null}
-            patchVuln={() => {}}
-        />);
-        const user = userEvent.setup();
-        await user.click(screen.getByRole('button', { name: 'Show Outdated', pressed: false }));
-        const historicalCell = await screen.findByRole('cell', { name: historical.id });
-        await user.keyboard('[ControlLeft>]');
-        await user.click(historicalCell);
-        await user.keyboard('[/ControlLeft]');
-        const bulkEstimate = screen.getByRole('button', { name: /change time estimate/i });
-        expect(bulkEstimate).toBeEnabled();
-
-        if (action === 'reset') {
-            await user.click(screen.getByRole('button', { name: /reset filters/i }));
-        } else {
-            await user.click(screen.getByRole('button', { name: 'Hide Outdated', pressed: true }));
-        }
-        expect(screen.queryByRole('cell', { name: historical.id })).not.toBeInTheDocument();
-        expect(bulkEstimate).toBeDisabled();
-    });
-
-    test('reset cancels a pending Outdated load', async () => {
-        let finishLoad: (response: string) => void = () => {};
-        fetchMock.mockResponse(request => new URL(request.url).pathname === '/api/vulnerabilities'
-            ? new Promise(resolve => { finishLoad = resolve; })
-            : Promise.resolve('[]'));
-        render(<TableVulnerabilities
-            vulnerabilities={[]}
-            variantId="variant-1"
-            appendAssessment={() => {}}
-            appendCVSS={() => null}
-            patchVuln={() => {}}
-        />);
-        const user = userEvent.setup();
-        await user.click(screen.getByRole('button', { name: 'Show Outdated', pressed: false }));
-        expect(screen.getByText('Loading outdated vulnerabilities…')).toBeInTheDocument();
-        await user.click(screen.getByRole('button', { name: /reset filters/i }));
-        finishLoad(JSON.stringify([vulnerabilities[0]]));
-        const outdated = screen.getByRole('button', { name: 'Show Outdated', pressed: false });
-        expect(outdated).toBeEnabled();
-        expect(screen.queryByRole('cell', { name: vulnerabilities[0].id })).not.toBeInTheDocument();
-    });
-
-    test('keeps historical selection through a local edit and same-scope reload until the row is removed', async () => {
-        const current = vulnerabilities[0];
-        const historical = { ...vulnerabilities[1], id: 'CVE-HISTORICAL-SELECTION' };
-        let pendingReload: ((result: string) => void) | undefined;
-        let loads = 0;
-        fetchMock.mockResponse(request => {
-            if (new URL(request.url).pathname !== '/api/vulnerabilities') return Promise.resolve('[]');
-            if (++loads === 1) return Promise.resolve(JSON.stringify([current, historical]));
-            return new Promise(resolve => { pendingReload = resolve; });
-        });
-        const table = (rows: Vulnerability[], dataRevision: number, variantId = 'variant-1') => (
-            <TableVulnerabilities vulnerabilities={rows} dataRevision={dataRevision} variantId={variantId}
-                appendAssessment={() => {}} appendCVSS={() => null} patchVuln={() => {}} />
-        );
-        const { rerender } = render(table([current], 1));
-        const user = userEvent.setup();
-        await user.click(screen.getByRole('button', { name: 'Show Outdated' }));
-        const cell = await screen.findByRole('cell', { name: historical.id });
-        fireEvent.click(cell, { ctrlKey: true });
-        const bulkEstimate = screen.getByRole('button', { name: /change time estimate/i });
-        expect(bulkEstimate).toBeEnabled();
-
-        rerender(table([{ ...current }], 1));
-        expect(bulkEstimate).toBeEnabled();
-        expect(loads).toBe(1);
-
-        rerender(table([current], 2));
-        await waitFor(() => expect(pendingReload).toBeDefined());
-        expect(screen.getByRole('cell', { name: historical.id })).toBeVisible();
-        expect(bulkEstimate).toBeEnabled();
-        await act(async () => pendingReload?.(JSON.stringify([current])));
-        expect(screen.queryByRole('cell', { name: historical.id })).not.toBeInTheDocument();
-        expect(bulkEstimate).toBeDisabled();
-
-        pendingReload = undefined;
-        rerender(table([current], 3));
-        await waitFor(() => expect(pendingReload).toBeDefined());
-        rerender(table([current], 4, 'variant-2'));
-        await act(async () => pendingReload?.(JSON.stringify([historical])));
-        expect(screen.getByRole('button', { name: 'Show Outdated' })).toBeEnabled();
-        expect(screen.queryByRole('cell', { name: historical.id })).not.toBeInTheDocument();
-    });
-
-    test('a failed Outdated refresh falls back to the latest current rows and drops stale selections', async () => {
-        const current = vulnerabilities[0];
-        const historical = { ...vulnerabilities[1], id: 'CVE-HISTORICAL-STALE' };
-        const updated = { ...current, id: 'CVE-CURRENT-NEW' };
-        let rejectReload: ((error: Error) => void) | undefined;
-        let loads = 0;
-        fetchMock.mockResponse(request => {
-            if (new URL(request.url).pathname !== '/api/vulnerabilities') return Promise.resolve('[]');
-            if (++loads === 1) return Promise.resolve(JSON.stringify([current, historical]));
-            return new Promise((_resolve, reject) => { rejectReload = reject; });
-        });
-        const table = (rows: Vulnerability[], revision: number) => (
-            <TableVulnerabilities vulnerabilities={rows} dataRevision={revision} variantId="variant-1"
-                appendAssessment={() => {}} appendCVSS={() => null} patchVuln={() => {}} />
-        );
-        const { rerender } = render(table([current], 1));
-        await userEvent.setup().click(screen.getByRole('button', { name: 'Show Outdated' }));
-        fireEvent.click(await screen.findByRole('cell', { name: historical.id }), { ctrlKey: true });
-        const bulkEstimate = screen.getByRole('button', { name: /change time estimate/i });
-        expect(bulkEstimate).toBeEnabled();
-
-        rerender(table([updated], 2));
-        await waitFor(() => expect(rejectReload).toBeDefined());
-        expect(screen.getByRole('cell', { name: historical.id })).toBeVisible();
-        await act(async () => rejectReload?.(new Error('reload failed')));
-        expect(screen.getByText('Failed to load outdated vulnerabilities')).toBeVisible();
-        expect(screen.getByRole('cell', { name: updated.id })).toBeVisible();
-        expect(screen.queryByRole('cell', { name: historical.id })).not.toBeInTheDocument();
-        expect(bulkEstimate).toBeDisabled();
-        expect(screen.getByRole('button', { name: 'Show Outdated', pressed: false })).toBeEnabled();
-    });
-
-    test('saving effort from an Outdated row keeps the current row’s package scope', async () => {
-        const current = {
-            ...vulnerabilities[0], packages: ['scope-lib@2'], packages_current: ['scope-lib@2'],
-            packages_current_by_variant: { 'variant-1': ['scope-lib@2'] },
-        };
-        fetchMock.mockResponse(async request => {
-            const url = new URL(request.url);
-            if (request.method === 'PATCH') {
-                return JSON.stringify({
-                    status: 'success', count: 1, vulnerabilities: [{ id: current.id, effort: { likely: 'PT6H' } }],
-                });
-            }
-            return JSON.stringify(url.pathname === '/api/vulnerabilities' ? [{
-                ...current, packages: ['scope-lib@1', 'scope-lib@2'],
-                packages_status_by_variant: { 'variant-1': ['scope-lib@1', 'scope-lib@2'] },
-            }] : []);
-        });
-        function ExplorerRows() {
-            const [rows, setRows] = React.useState<Vulnerability[]>([current]);
-            return <><output data-testid="current-packages">{rows[0].packages.join(', ')}</output><TableVulnerabilities
-                vulnerabilities={rows}
-                variantId="variant-1"
-                appendAssessment={() => {}}
-                appendCVSS={() => null}
-                patchVuln={(id: string, patch: VulnerabilityPatch) => setRows(prev => prev.map(row => {
-                    if (row.id !== id) return row;
-                    return typeof patch === 'function' ? patch(row) : patch;
-                }))}
-            /></>;
-        }
-
-        render(<ExplorerRows />);
-        const user = userEvent.setup();
-        await user.click(screen.getByRole('button', { name: 'Show Outdated', pressed: false }));
-        await screen.findByRole('cell', { name: 'scope-lib@1, scope-lib@2' });
-        await user.click(screen.getByTitle(/select all/i));
-        await user.click(screen.getByRole('button', { name: /change time estimate/i }));
-        await user.type(screen.getByPlaceholderText(/shortest estimate/i), '2h');
-        await user.type(screen.getByPlaceholderText(/balanced estimate/i), '6h');
-        await user.type(screen.getByPlaceholderText(/longest estimate/i), '8h');
-        await user.click(screen.getByText(/save estimation/i));
-        await screen.findByText(/successfully updated/i);
-        const outdated = screen.getByRole('button', { name: 'Hide Outdated', pressed: true });
-        await waitFor(() => expect(outdated).toBeEnabled());
-        await user.click(outdated);
-        expect(screen.getByRole('button', { name: 'Show Outdated', pressed: false })).toBeVisible();
-        expect(screen.getByRole('cell', { name: 'scope-lib@2' })).toBeInTheDocument();
-        expect(screen.getByTestId('current-packages')).toHaveTextContent(/^scope-lib@2$/);
-    });
-
     test('Outdated switches the status summary and filter between current and historical targets', async () => {
         const currentPackage = 'scope-lib@2';
         const historicalPackage = 'scope-lib@1';
@@ -554,28 +349,29 @@ describe('Vulnerability Table', () => {
             simplified_status: index === 0 ? 'Pending Assessment' : 'Fixed',
             timestamp: '2026-11-01T12:00:00Z', responses: [],
         }));
-        fetchMock.mockResponse(async request => JSON.stringify(new URL(request.url).pathname === '/api/vulnerabilities'
-            ? [{
-                ...current, packages: [currentPackage, historicalPackage],
-                packages_status_by_variant: { 'variant-1': [currentPackage, historicalPackage] },
-            }]
-            : assessments));
-        render(<TableVulnerabilities vulnerabilities={Vulnerabilities.enrich_with_assessments([current], assessments)}
+        const historical = {
+            ...current, packages: [currentPackage, historicalPackage],
+            packages_status_by_variant: { 'variant-1': [currentPackage, historicalPackage] },
+        };
+        const table = (includeOutdated: boolean) => <TableVulnerabilities key={String(includeOutdated)}
+            includeOutdated={includeOutdated}
+            vulnerabilities={Vulnerabilities.enrich_with_assessments([includeOutdated ? historical : current], assessments)}
             variantId="variant-1" preferenceScopeKey="outdated-status-tests"
-            appendAssessment={() => {}} appendCVSS={() => null} patchVuln={() => {}} />);
+            appendAssessment={() => {}} appendCVSS={() => null} patchVuln={() => {}} />;
+        const { rerender } = render(table(false));
 
         const user = userEvent.setup();
         expect(screen.getByRole('cell', { name: 'Pending Assessment' })).toBeVisible();
         await user.click(screen.getByRole('button', { name: /^status$/i }));
         expect(screen.queryByRole('checkbox', { name: 'Fixed' })).not.toBeInTheDocument();
 
-        await user.click(screen.getByRole('button', { name: 'Show Outdated' }));
+        rerender(table(true));
         expect(await screen.findByRole('cell', { name: 'Pending Assessment, Fixed' })).toBeVisible();
         await user.click(screen.getByRole('button', { name: /^status$/i }));
         await user.click(screen.getByRole('checkbox', { name: 'Fixed' }));
         expect(screen.getByRole('cell', { name: 'Pending Assessment, Fixed' })).toBeVisible();
 
-        await user.click(screen.getByRole('button', { name: 'Hide Outdated' }));
+        rerender(table(false));
         expect(screen.queryByRole('cell', { name: /Pending Assessment/ })).not.toBeInTheDocument();
         await user.click(screen.getByRole('button', { name: /^status$/i }));
         const fixed = screen.getByRole('checkbox', { name: 'Fixed' });
@@ -1286,30 +1082,28 @@ describe('Vulnerability Table', () => {
         const compact = { ...vulnerabilities[0], details_loaded: false, texts: [] };
         fetchMock.mockResponse(async request => {
             const url = new URL(request.url);
-            if (url.pathname === '/api/vulnerabilities') {
-                return JSON.stringify([{ ...compact, packages_status_by_variant: {} }]);
-            }
             if (url.pathname === `/api/vulnerabilities/${compact.id}`) {
                 const scoped = url.searchParams.get('variant_ids') === 'first,second'
                     && url.searchParams.get('operation') === 'union'
-                    && url.searchParams.get('project_id') === 'project-1'
-                    && url.searchParams.get('include_outdated') === 'true';
+                    && url.searchParams.get('project_id') === 'project-1';
+                expect(scoped).toBe(true);
+                const historical = url.searchParams.get('include_outdated') === 'true';
                 return JSON.stringify({
-                    ...compact, texts: [{ title: 'description', content: scoped ? 'Selected historical text' : 'Current view text' }],
+                    ...compact, texts: [{ title: 'description', content: historical ? 'Selected historical text' : 'Current view text' }],
                 });
             }
             return '[]';
         });
-        const { container } = render(<TableVulnerabilities vulnerabilities={[compact]}
+        const table = (includeOutdated: boolean) => <TableVulnerabilities includeOutdated={includeOutdated} vulnerabilities={[compact]}
             projectId="project-1" variantIds={['first', 'second']} multiOperation="union"
-            appendAssessment={() => {}} appendCVSS={() => null} patchVuln={() => {}} />);
+            appendAssessment={() => {}} appendCVSS={() => null} patchVuln={() => {}} />;
+        const { container, rerender } = render(table(false));
         const row = () => container.querySelector('tr.row-with-hover-effect')!;
         fireEvent.mouseEnter(row());
         await waitFor(() => expect(screen.getByRole('tooltip')).toHaveTextContent('Current view text'));
         fireEvent.mouseLeave(row());
 
-        await userEvent.click(screen.getByRole('button', { name: 'Show Outdated' }));
-        await screen.findByRole('button', { name: 'Hide Outdated' });
+        rerender(table(true));
         fireEvent.mouseEnter(row());
         await waitFor(() => expect(screen.getByRole('tooltip')).toHaveTextContent('Selected historical text'));
         fireEvent.mouseLeave(row());

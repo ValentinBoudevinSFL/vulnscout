@@ -54,7 +54,8 @@ type Props = {
     onNavigate?: (index: number) => void;
     variantId?: string;
     projectId?: string;
-    historicalComparison?: ComparisonScope;
+    comparisonScope?: ComparisonScope;
+    includeOutdated?: boolean;
 };
 
 // How long the inline "Copied" confirmation stays next to a copy button.
@@ -148,7 +149,7 @@ type PendingAiEditTransition =
     | { kind: "exit" };
 
   function VulnModal(props: Readonly<Props>) {
-        const { vuln, detailsLoading = false, detailsError = false, isEditing: initialIsEditing, readOnly = false, onClose, appendAssessment, appendCVSS, vulnerabilities, currentIndex, onNavigate, variantId, projectId, historicalComparison } = props;
+        const { vuln, detailsLoading = false, detailsError = false, isEditing: initialIsEditing, readOnly = false, onClose, appendAssessment, appendCVSS, vulnerabilities, currentIndex, onNavigate, variantId, projectId, comparisonScope, includeOutdated = false } = props;
     // Full-row saves belong to the snapshot the modal opened with. Its callback
     // carries that revision so Explorer can reread instead of installing a stale row.
     const [patchVuln] = useState(() => props.patchVuln);
@@ -352,7 +353,7 @@ type PendingAiEditTransition =
             const data = await r.json();
             if (current() && Array.isArray(data)) {
                 const fullAssessments = data.flatMap(asAssessment).filter((a): a is Assessment => !Array.isArray(a));
-                const scopedAssessments = variantId
+                const scopedAssessments = variantId && !comparisonScope?.baseVariantId
                     ? fullAssessments.filter(a => appliesToVariant(a, variantId))
                     : fullAssessments;
                 vuln.assessments = scopedAssessments;
@@ -363,7 +364,7 @@ type PendingAiEditTransition =
             // Keep whatever was previously loaded.
         }
         return null;
-    }, [beginRequest, vuln, projectId, variantId]);
+    }, [beginRequest, vuln, projectId, variantId, comparisonScope?.baseVariantId]);
 
     // Fetch server-built assessment rows for this vulnerability (Task 8/11),
     // replacing the old client-side grouping heuristic. When this request is
@@ -691,8 +692,8 @@ type PendingAiEditTransition =
         setRefreshError(null);
         setRefreshedList([]);
         const reloadMetadata = async (): Promise<Partial<Vulnerability>> => {
-            const details = historicalComparison
-                ? await Vulnerabilities.getDetails(vuln.id, variantId, projectId, undefined, historicalComparison)
+            const details = comparisonScope || includeOutdated
+                ? await Vulnerabilities.getDetails(vuln.id, variantId, projectId, undefined, comparisonScope, includeOutdated)
                 : await Vulnerabilities.getDetails(vuln.id, variantId, projectId);
             if (!details) throw new Error("Failed to load refreshed vulnerability details.");
             // Refresh endpoints return global records, not the modal's project/variant scope.
@@ -713,7 +714,7 @@ type PendingAiEditTransition =
             };
         };
         const metadataForRow = (row: Vulnerability, metadata: Partial<Vulnerability>) =>
-            historicalComparison && row.packages_status_by_variant === undefined
+            includeOutdated && row.packages_status_by_variant === undefined
                 ? { ...metadata, texts: row.texts, severity: row.severity } : metadata;
         const latest = (...values: Array<string | undefined>) =>
             values.filter((value): value is string => Boolean(value)).sort().pop();
@@ -807,7 +808,7 @@ type PendingAiEditTransition =
             setRefreshing(false);
             setHistoryVersion(version => version + 1);
         }
-    }, [vuln, patchVuln, variantId, projectId, historicalComparison]);
+    }, [vuln, patchVuln, variantId, projectId, comparisonScope, includeOutdated]);
 
     const copyRowId = async (row: Assessment) => {
         try {
@@ -1311,12 +1312,21 @@ type PendingAiEditTransition =
                 : coversTarget(a, variantIdValue, pkg)))
             .reduce<Assessment | null>((best, a) => {
                 if (!best) return a;
-                return new Date(a.timestamp).getTime() > new Date(best.timestamp).getTime() ? a : best;
+                const delta = new Date(a.timestamp).getTime() - new Date(best.timestamp).getTime();
+                return delta > 0 || (delta === 0 && a.id > best.id) ? a : best;
             }, null);
 
     type StatusRow = { variant: Variant; pkg: string | null; assessment: Assessment | null; deprecated: boolean };
 
     const allStatusRows: StatusRow[] = availableVariants.flatMap((variant): StatusRow[] => {
+        if (vuln.packages_current_by_variant !== undefined) {
+            const current = vuln.packages_current_by_variant[variant.id] ?? [];
+            const visible = (includeOutdated ? vuln.packages_status_by_variant?.[variant.id] : undefined) ?? current;
+            return visible.map(pkg => ({
+                variant, pkg, assessment: latestAssessmentFor(variant.id, pkg),
+                deprecated: !current.includes(pkg),
+            }));
+        }
         const variantActivePkgs = variantPackageMap[variant.id];
         const variantPkgs = variantActivePkgs ?? [];
         // Packages affected by this vuln that still exist in the variant's active SBOM.
@@ -2087,13 +2097,15 @@ type PendingAiEditTransition =
                             </div>
                             {currentAssessmentRows.length > 0 && (
                                 <div className="mb-4 p-3 rounded-lg bg-gray-800/70 border border-gray-600">
-                                    <h4 className="font-semibold text-gray-200 mb-2">Assessments on current SBOM packages and variants</h4>
+                                    <h4 className="font-semibold text-gray-200 mb-2">{vuln.packages_current_by_variant !== undefined
+                                        ? 'Assessments on current findings' : 'Assessments on current SBOM packages and variants'}</h4>
                                     {renderStatusTable(sortStatusRows(currentAssessmentRows))}
                                 </div>
                             )}
                             {deprecatedAssessmentRows.length > 0 && (
                                 <div className="mb-4 p-3 rounded-lg bg-gray-800/70 border border-gray-600">
-                                    <h4 className="font-semibold text-gray-200 mb-2">Assessments on old packages and variants (not present in current SBOMs)</h4>
+                                    <h4 className="font-semibold text-gray-200 mb-2">{vuln.packages_current_by_variant !== undefined
+                                        ? 'Assessments on historical findings' : 'Assessments on old packages and variants (not present in current SBOMs)'}</h4>
                                     {renderStatusTable(sortStatusRows(deprecatedAssessmentRows))}
                                 </div>
                             )}

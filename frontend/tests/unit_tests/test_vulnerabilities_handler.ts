@@ -142,7 +142,7 @@ describe('Vulnerabilities parsing CVSS branches', () => {
     await Vulnerabilities.searchDescriptionTerms(
       ['CVE-TEST-1'], ['historical'], compareId, 'project-1', undefined, true, comparison,
     );
-    await Vulnerabilities.getDetails('CVE-TEST-1', compareId, 'project-1', undefined, comparison);
+    await Vulnerabilities.getDetails('CVE-TEST-1', compareId, 'project-1', undefined, comparison, true);
     await Vulnerabilities.list(
       comparison.baseVariantId, 'project-1', compareId, comparison.operation,
       comparison.variantIds, comparison.multiOperation, undefined, true,

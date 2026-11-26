@@ -427,24 +427,22 @@ class TestPackagesFiltering:
             "error": "A variant or project scope is required for outdated packages"
         }
 
-    def test_packages_include_outdated_finding_variant_rows(self, client_and_data, app_with_data):
+    def test_packages_include_outdated_sbom_rows_without_a_finding(self, client_and_data, app_with_data):
         client, data = client_and_data
         application, _ = app_with_data
         from src.extensions import db
         from src.models.package import Package
-        from src.models.vulnerability import Vulnerability
-        from src.models.finding import Finding
-        from src.models.observation import Observation
         from src.models.scan import Scan
+        from src.models.sbom_document import SBOMDocument
+        from src.models.sbom_package import SBOMPackage
 
         with application.app_context():
             old_package = Package.find_or_create("cairo", "1.15.0")
-            Vulnerability.create_record("CVE-2099-OLD1")
-            old_finding = Finding.get_or_create(old_package.id, "CVE-2099-OLD1")
-            scan_id = db.session.execute(
-                db.select(Scan.id).where(Scan.variant_id == uuid.UUID(data["variant_a_id"]))
-            ).scalar_one()
-            Observation.create(old_finding.id, scan_id)
+            old_scan = Scan(variant_id=uuid.UUID(data["variant_a_id"]), timestamp=datetime(2015, 1, 1, tzinfo=timezone.utc))
+            db.session.add(old_scan)
+            db.session.flush()
+            old_doc = SBOMDocument.create(path="/old.cdx.json", source_name="old.cdx.json", scan_id=old_scan.id)
+            SBOMPackage.create(old_doc.id, old_package.id)
             db.session.commit()
 
         response = client.get(
@@ -455,26 +453,26 @@ class TestPackagesFiltering:
         old_row = next(item for item in body if item["id"] == "cairo@1.15.0")
         assert old_row["outdated"] is True
         assert old_row["variants"] == ["VariantA"]
-        assert old_row["vulnerability_ids"] == ["CVE-2099-OLD1"]
+        assert old_row["sbom_documents"] == ["old.cdx.json"]
         assert all(item["outdated"] is True for item in body)
 
     def test_packages_dict_keeps_active_and_outdated_variant_rows(self, client_and_data, app_with_data):
         client, data = client_and_data
         application, _ = app_with_data
         from src.extensions import db
-        from src.models.finding import Finding
-        from src.models.observation import Observation
         from src.models.package import Package
         from src.models.scan import Scan
+        from src.models.sbom_document import SBOMDocument
+        from src.models.sbom_package import SBOMPackage
 
         with application.app_context():
             cairo = Package.get_by_string_id("cairo@1.16.0")
             assert cairo is not None
-            finding = Finding.get_or_create(cairo.id, "CVE-2020-35492")
-            variant_b_scan_id = db.session.execute(
-                db.select(Scan.id).where(Scan.variant_id == uuid.UUID(data["variant_b_id"]))
-            ).scalar_one()
-            Observation.create(finding.id, variant_b_scan_id)
+            old_scan = Scan(variant_id=uuid.UUID(data["variant_b_id"]), timestamp=datetime(2015, 1, 1, tzinfo=timezone.utc))
+            db.session.add(old_scan)
+            db.session.flush()
+            old_doc = SBOMDocument.create(path="/old.cdx.json", source_name="old.cdx.json", scan_id=old_scan.id)
+            SBOMPackage.create(old_doc.id, cairo.id)
             db.session.commit()
 
         response = client.get(

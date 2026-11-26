@@ -551,9 +551,9 @@ def delete_outdated_data(
 ) -> dict[str, int]:
     """Delete every package observation and custom assessment marked outdated.
 
-    The predicates deliberately mirror ``/api/packages?outdated_only=true``
-    and ``annotate_assessments_outdated``.  Shared records are retained until
-    no scan, assessment, or SBOM relation references them.
+    Cleanup uses the assessment staleness rules, not the Explorer's
+    ever-observed inventory. Shared records are retained until no scan,
+    assessment, or SBOM relation references them.
     Refresh history is cleared globally only when explicitly requested; current
     vulnerability values and refresh timestamps are not reset by this option.
     """

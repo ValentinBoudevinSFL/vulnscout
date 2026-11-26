@@ -37,6 +37,7 @@ from ..helpers.assessment_io import (
 from ..helpers.assessment_staleness import annotate_assessments_outdated
 from ..controllers.assessment_targets import annotate_targets
 from ..helpers.active_scans import active_scan_ids_for_variant
+from ..helpers.finding_evidence import finding_packages_for_scans, variant_finding_targets
 from ._assessment_write import (
     apply_reconcile,
     create_assessment_record,
@@ -48,7 +49,6 @@ from ._assessment_write import (
     resolve_targets,
     validate_deletions,
 )
-from .vulnerabilities import finding_packages_for_scans
 
 from flask import request, Flask
 from flask.typing import ResponseReturnValue
@@ -1515,25 +1515,21 @@ def init_app(app: Flask) -> None:
 
     @app.route('/api/vulnerabilities/<vuln_id>/variant-active-packages')
     def list_variant_active_packages(vuln_id: str) -> ResponseReturnValue:
-        """For each variant affected by this vulnerability, return the subset of
-        the vulnerability's packages still present in that variant's active SBOM.
+        """Return exact current and historical finding targets for assessment editing.
 
-        Lets the front-end classify deprecated (variant, package) pairs in a
-        single request instead of one ``/api/packages`` call per variant.
+        A target can be historical even when the package is still in the active SBOM.
 
         OpenAPI:
         query project_id uuid optional Restrict the result to one project.
-        response 200 VariantActivePackages Active packages by variant.
+        response 200 VariantActivePackages Current writable packages and all finding targets by variant.
         """
-        from ..helpers.active_targets import variant_active_packages
-
         project_uuid: UUID | None = None
         project_id = request.args.get('project_id')
         if project_id:
             project_uuid, err = parse_uuid_or_400(project_id, "project_id")
             if err:
                 return err
-        return variant_active_packages(vuln_id, project_uuid), 200
+        return variant_finding_targets(vuln_id, project_uuid), 200
 
     @app.route("/api/vulnerabilities/<vuln_id>/assessments", methods=["POST"])
     def add_assessment(vuln_id: str) -> ResponseReturnValue:

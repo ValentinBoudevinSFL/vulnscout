@@ -2,7 +2,6 @@ import Vulnerabilities, { type Vulnerability, type VulnerabilityPatch } from "..
 import type { CVSS } from "../handlers/vulnerabilities";
 import type { Assessment } from "../handlers/assessments";
 import Assessments from "../handlers/assessments";
-import { removeDuplicateAssessments } from "../handlers/assessments";
 import type { RefreshProgressView } from "../handlers/operationStore";
 import { createColumnHelper, SortingFn, RowSelectionState, Row, Table } from '@tanstack/react-table'
 import { useMemo, useState, useEffect, useCallback, useRef, useSyncExternalStore } from "react";
@@ -29,12 +28,12 @@ type SourceBanner = { message: string; type: 'error' | 'success' } | null;
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import { faFilter, faCaretDown, faCircleQuestion, faSync, faCircleInfo, faBook } from '@fortawesome/free-solid-svg-icons';
 import ExplicitSearchInput from '../components/ExplicitSearchInput';
-import ToggleSwitch from '../components/ToggleSwitch';
 import { useLocalStorageState } from '../handlers/localStorage';
 import RangeSlider from "../components/RangeSlider";
 
 type Props = {
     vulnerabilities: Vulnerability[];
+    includeOutdated?: boolean;
     dataRevision?: number;
     appendAssessment: (added: Assessment) => void;
     appendCVSS: (vulnId: string, vector: string) => CVSS | null;
@@ -340,7 +339,7 @@ const DEFAULT_VISIBLE_COLUMNS = [
     'ID', 'Severity', 'EU KEV', 'EPSS Score', 'SBOM Affected', 'Variants', 'Status', 'Last Assessed',
 ];
 
-function TableVulnerabilities ({ vulnerabilities, dataRevision, filterLabel, filterValue, filterVulnerabilityIds, preferenceScopeKey = 'unscoped', appendAssessment, appendCVSS, patchVuln, variantId, projectId, baseVariantId, compareOperation, variantIds, multiOperation, missingEuvdDataBannerDismissed, onMissingEuvdDataBannerDismissedChange, missingPublishedDateDataBannerDismissed, onMissingPublishedDateDataBannerDismissedChange, onAgentContextChange }: Readonly<Props>) {
+function TableVulnerabilities ({ vulnerabilities, includeOutdated = false, dataRevision, filterLabel, filterValue, filterVulnerabilityIds, preferenceScopeKey = 'unscoped', appendAssessment, appendCVSS, patchVuln, variantId, projectId, baseVariantId, compareOperation, variantIds, multiOperation, missingEuvdDataBannerDismissed, onMissingEuvdDataBannerDismissedChange, missingPublishedDateDataBannerDismissed, onMissingPublishedDateDataBannerDismissedChange, onAgentContextChange }: Readonly<Props>) {
     const preferenceKey = `vulnscout.tables.vulnerabilities.${encodeURIComponent(preferenceScopeKey)}`;
     const comparisonScope = useMemo(() => ({
         baseVariantId, operation: compareOperation, variantIds, multiOperation,
@@ -354,15 +353,13 @@ function TableVulnerabilities ({ vulnerabilities, dataRevision, filterLabel, fil
     const [modalDetailsLoading, setModalDetailsLoading] = useState(false);
     const [modalDetailsError, setModalDetailsError] = useState(false);
     const hoverDetailsCache = useRef(new Map<string, Vulnerability>());
-    const modalHistoricalComparison = modalVuln?.packages_status_by_variant === undefined ? undefined : comparisonScope;
 
     const loadHoverDetails = useCallback(async (summary: Vulnerability): Promise<Vulnerability> => {
         if (summary.details_loaded !== false) return summary;
-        const historical = summary.packages_status_by_variant !== undefined;
-        const cacheKey = JSON.stringify([summary.id, evidenceScopeKey, historical, dataRevision]);
-        const details = hoverDetailsCache.current.get(cacheKey) ?? await (historical
-            ? Vulnerabilities.getDetails(summary.id, variantId, projectId, undefined, comparisonScope)
-            : Vulnerabilities.getDetails(summary.id, variantId, projectId));
+        const cacheKey = JSON.stringify([summary.id, evidenceScopeKey, includeOutdated, dataRevision]);
+        const details = hoverDetailsCache.current.get(cacheKey) ?? await Vulnerabilities.getDetails(
+            summary.id, variantId, projectId, undefined, comparisonScope, includeOutdated,
+        );
         if (details) hoverDetailsCache.current.set(cacheKey, details);
         return details ? {
             ...summary,
@@ -372,7 +369,7 @@ function TableVulnerabilities ({ vulnerabilities, dataRevision, filterLabel, fil
             severity: { ...summary.severity, cvss: details.severity.cvss },
             details_loaded: true,
         } : { ...summary, details_loaded: true };
-    }, [variantId, projectId, comparisonScope, evidenceScopeKey, dataRevision]);
+    }, [variantId, projectId, comparisonScope, evidenceScopeKey, dataRevision, includeOutdated]);
 
     useEffect(() => {
         if (!modalVuln || modalVuln.details_loaded !== false) {
@@ -385,9 +382,9 @@ function TableVulnerabilities ({ vulnerabilities, dataRevision, filterLabel, fil
         const vulnId = modalVuln.id;
         setModalDetailsLoading(true);
         setModalDetailsError(false);
-        const detailsRequest = modalHistoricalComparison
-            ? Vulnerabilities.getDetails(vulnId, variantId, projectId, controller.signal, modalHistoricalComparison)
-            : Vulnerabilities.getDetails(vulnId, variantId, projectId, controller.signal);
+        const detailsRequest = Vulnerabilities.getDetails(
+            vulnId, variantId, projectId, controller.signal, comparisonScope, includeOutdated,
+        );
         detailsRequest
             .then((details) => {
                 if (!details || controller.signal.aborted) return;
@@ -419,7 +416,7 @@ function TableVulnerabilities ({ vulnerabilities, dataRevision, filterLabel, fil
             });
 
         return () => controller.abort();
-    }, [modalVuln, variantId, projectId, modalHistoricalComparison]);
+    }, [modalVuln, variantId, projectId, comparisonScope, includeOutdated]);
     const [isEditing, setIsEditing] = useState<boolean>(false);
     // A filter jump (e.g. "Show Vulnerabilities" from the packages table) remounts this
     // component with filterLabel/filterValue set. The effect below resets every other
@@ -471,10 +468,6 @@ function TableVulnerabilities ({ vulnerabilities, dataRevision, filterLabel, fil
     const [showShortcutHelper, setShowShortcutHelper] = useState(false);
     const [showSearchHelper, setShowSearchHelper] = useState(false);
     const [showMoreFilters, setShowMoreFilters] = useState(false);
-    const [includeOutdated, setIncludeOutdated] = useState(false);
-    const [outdatedDataset, setOutdatedDataset] = useState<{ scope: string; rows: Vulnerability[] } | null>(null);
-    const [outdatedLoading, setOutdatedLoading] = useState(false);
-    const outdatedEditRevision = useRef(0);
     const [aiSuggestionFilter, setAiSuggestionFilter] = useLocalStorageState<'any' | 'has' | 'no'>(`${preferenceKey}.aiSuggestion`, 'any', { skipInitialRead: isFilterJump });
     const [aiSuggestionVulnIds, setAiSuggestionVulnIds] = useState<Set<string>>(new Set());
 
@@ -485,90 +478,9 @@ function TableVulnerabilities ({ vulnerabilities, dataRevision, filterLabel, fil
     const searchHelperButtonRef = useRef<HTMLButtonElement>(null);
     const searchHelperDropdownRef = useRef<HTMLDivElement>(null);
     const moreFiltersRef = useRef<HTMLDivElement>(null);
-    const outdatedRequestRef = useRef<AbortController | null>(null);
-
-    const outdatedRows = outdatedDataset?.scope === evidenceScopeKey ? outdatedDataset.rows : null;
-    const showingOutdated = includeOutdated && outdatedRows !== null;
-    const tableVulnerabilities = showingOutdated ? outdatedRows : vulnerabilities;
-
-    const toggleOutdated = useCallback(async function loadOutdated(checked: boolean) {
-        if (!checked) {
-            outdatedRequestRef.current?.abort();
-            outdatedRequestRef.current = null;
-            setOutdatedLoading(false);
-            setIncludeOutdated(false);
-            return;
-        }
-
-        const controller = new AbortController();
-        const editRevision = outdatedEditRevision.current;
-        outdatedRequestRef.current?.abort();
-        outdatedRequestRef.current = controller;
-        setOutdatedLoading(true);
-        try {
-            const assessmentRequests = variantIds && variantIds.length >= 2
-                ? variantIds.map(id => Assessments.list(id, projectId, controller.signal))
-                : baseVariantId && variantId
-                    ? [Assessments.list(baseVariantId, projectId, controller.signal),
-                        Assessments.list(variantId, projectId, controller.signal)]
-                    : [Assessments.list(variantId, projectId, controller.signal)];
-            const [allVulnerabilities, assessmentGroups] = await Promise.all([
-                Vulnerabilities.list(
-                    baseVariantId ?? variantId,
-                    projectId,
-                    baseVariantId ? variantId : undefined,
-                    compareOperation,
-                    variantIds,
-                    multiOperation,
-                    controller.signal,
-                    true,
-                ),
-                Promise.all(assessmentRequests),
-            ]);
-            if (controller.signal.aborted) return;
-            if (editRevision !== outdatedEditRevision.current) {
-                void loadOutdated(true);
-                return;
-            }
-            setOutdatedDataset({
-                scope: evidenceScopeKey,
-                rows: Vulnerabilities.enrich_with_assessments(
-                    allVulnerabilities, removeDuplicateAssessments(assessmentGroups.flat()),
-                ),
-            });
-            setIncludeOutdated(true);
-        } catch {
-            if (!controller.signal.aborted) {
-                setOutdatedDataset(null);
-                setIncludeOutdated(false);
-                setGeneralBanner({ message: 'Failed to load outdated vulnerabilities', type: 'error' });
-            }
-        } finally {
-            if (outdatedRequestRef.current === controller) {
-                outdatedRequestRef.current = null;
-                if (!controller.signal.aborted) setOutdatedLoading(false);
-            }
-        }
-    }, [baseVariantId, compareOperation, multiOperation, projectId, variantId, variantIds, evidenceScopeKey]);
-
-    const previousEvidence = useRef({ scope: evidenceScopeKey, revision: dataRevision });
-    useEffect(() => {
-        const previous = previousEvidence.current;
-        previousEvidence.current = { scope: evidenceScopeKey, revision: dataRevision };
-        if (previous.scope !== evidenceScopeKey) {
-            void toggleOutdated(false);
-            setOutdatedDataset(null);
-            setSelectedRows({});
-            setModalVuln(undefined);
-            setModalVulnSnapshot([]);
-            hoverDetailsCache.current.clear();
-        } else if (previous.revision !== dataRevision) {
-            hoverDetailsCache.current.clear();
-            if (includeOutdated || outdatedRequestRef.current) void toggleOutdated(true);
-        }
-    }, [dataRevision, evidenceScopeKey, includeOutdated, toggleOutdated]);
-
-    useEffect(() => () => outdatedRequestRef.current?.abort(), []);
+    const showingOutdated = includeOutdated;
+    const tableVulnerabilities = vulnerabilities;
+    useEffect(() => { hoverDetailsCache.current.clear(); }, [dataRevision, evidenceScopeKey, includeOutdated]);
 
     const keyboardShortcuts = [
         { key: '/', description: 'Focus search bar' },
@@ -669,7 +581,6 @@ function TableVulnerabilities ({ vulnerabilities, dataRevision, filterLabel, fil
         setEpssRange({ min: 0, max: 100 });
         setSelectedAttackVectors([]);
         setSelectedFirstScanDates([]);
-        void toggleOutdated(false);
         setAiSuggestionFilter('any');
     }, [
         filterLabel, filterValue,
@@ -677,7 +588,7 @@ function TableVulnerabilities ({ vulnerabilities, dataRevision, filterLabel, fil
         setSearch, setDraftSearch,
         setPublishedDateFilterType, setPublishedDateValue, setPublishedDaysValue, setPublishedDateFrom, setPublishedDateTo,
         setShowCustomSeverityFilter, setSeverityRange, setShowCustomEpssFilter, setEpssRange,
-        setSelectedAttackVectors, setSelectedFirstScanDates, setAiSuggestionFilter, toggleOutdated,
+        setSelectedAttackVectors, setSelectedFirstScanDates, setAiSuggestionFilter,
     ]);
 
     // Fetch pending AI suggestions (origin == 'ai') for the current scope. These are
@@ -796,20 +707,10 @@ function TableVulnerabilities ({ vulnerabilities, dataRevision, filterLabel, fil
 
     const handlePatchVuln = useCallback((vulnId: string, patch: VulnerabilityPatch) => {
         patchVuln(vulnId, patch);
-        outdatedEditRevision.current++;
         const update = (v: Vulnerability) => v.id !== vulnId ? v : typeof patch === 'function' ? patch(v) : patch;
-        setOutdatedDataset(current => current?.scope === evidenceScopeKey
-            ? { ...current, rows: current.rows.map(update) } : current);
         setModalVuln(prev => prev && update(prev));
         setModalVulnSnapshot(prev => prev.map(update));
-    }, [patchVuln, evidenceScopeKey]);
-
-    const handleAppendAssessment = useCallback((assessment: Assessment) => {
-        appendAssessment(assessment);
-        outdatedEditRevision.current++;
-        setOutdatedDataset(current => current?.scope === evidenceScopeKey
-            ? { ...current, rows: Vulnerabilities.append_assessment(current.rows, assessment) } : current);
-    }, [appendAssessment, evidenceScopeKey]);
+    }, [patchVuln]);
 
     const columnDisplayNames = useMemo(() => ({
         'select-checkbox': 'Select',
@@ -954,7 +855,16 @@ function TableVulnerabilities ({ vulnerabilities, dataRevision, filterLabel, fil
             columnHelper.accessor(row => showingOutdated ? row.packages : row.packages_current, {
             id: 'packages',
             header: () => <div className="flex items-center justify-center">SBOM Affected</div>,
-            cell: info => <div className="flex items-center justify-center h-full text-center">{info.getValue().map(p => formatPkgId(p.split('+git')[0])).join(', ')}</div>,
+            cell: info => {
+                const { packages_status_by_variant, packages_current_by_variant } = info.row.original;
+                const historicalFindings = showingOutdated && Object.entries(packages_status_by_variant ?? {})
+                    .some(([vid, packages]) => packages.some(pkg => !packages_current_by_variant?.[vid]?.includes(pkg)));
+                return <div className="flex items-center justify-center gap-2 h-full text-center">
+                    {info.getValue().map(p => formatPkgId(p.split('+git')[0])).join(', ')}
+                    {historicalFindings && <span className="rounded bg-amber-900 px-1 text-xs text-amber-200"
+                        title="One or more package findings are no longer current in their variant">Outdated finding</span>}
+                </div>;
+            },
             enableSorting: false,
             size: 255
             }),
@@ -984,8 +894,8 @@ function TableVulnerabilities ({ vulnerabilities, dataRevision, filterLabel, fil
                 <div className="space-y-1 text-gray-100">
                     <p>Status aggregates the newest assessment for each package and variant in the current scope.</p>
                     <p>{showingOutdated
-                        ? 'Showing statuses for current and superseded SBOM packages.'
-                        : 'Showing statuses for current SBOM packages only.'}</p>
+                        ? 'Showing statuses for current and historical package findings.'
+                        : 'Showing statuses for current package findings only.'}</p>
                     <p>Scope follows your active project, variant, and compare selection.</p>
                     <p>Display lists every distinct outcome, for example: Exploitable, Pending Assessment.</p>
                     <p>Filtering matches vulnerabilities when any selected status is present in the summary.</p>
@@ -1592,7 +1502,6 @@ function TableVulnerabilities ({ vulnerabilities, dataRevision, filterLabel, fil
     };
 
     function resetFilters() {
-        void toggleOutdated(false);
         descriptionSearchController.current?.abort();
         setSearch('');
         setDraftSearch('');
@@ -1946,16 +1855,6 @@ function TableVulnerabilities ({ vulnerabilities, dataRevision, filterLabel, fil
                 )}
             </div>
 
-            <div className="flex items-center gap-2" title="Include vulnerabilities and statuses for superseded SBOM packages">
-                <ToggleSwitch
-                    enabled={includeOutdated}
-                    setEnabled={checked => void toggleOutdated(checked)}
-                    disabled={outdatedLoading}
-                    label="Outdated"
-                />
-                {outdatedLoading && <span role="status" className="text-xs text-gray-300">Loading outdated vulnerabilities…</span>}
-            </div>
-
             <div className="ml-auto flex items-center gap-2 relative">
                 <button
                     ref={shortcutButtonRef}
@@ -2007,7 +1906,7 @@ function TableVulnerabilities ({ vulnerabilities, dataRevision, filterLabel, fil
             vulnerabilities={tableVulnerabilities}
             selectedVulns={selectedVulns}
             resetVulns={() => setSelectedRows({})}
-            appendAssessment={handleAppendAssessment}
+            appendAssessment={appendAssessment}
             patchVuln={handlePatchVuln}
             triggerBanner={triggerBanner}
             hideBanner={closeBanner}
@@ -2051,7 +1950,7 @@ function TableVulnerabilities ({ vulnerabilities, dataRevision, filterLabel, fil
                 setModalVulnSnapshot([]);
                 setIsEditing(false);
             }}
-            appendAssessment={handleAppendAssessment}
+            appendAssessment={appendAssessment}
             appendCVSS={appendCVSS}
             patchVuln={handlePatchVuln}
             vulnerabilities={modalVulnSnapshot}
@@ -2059,7 +1958,8 @@ function TableVulnerabilities ({ vulnerabilities, dataRevision, filterLabel, fil
             onNavigate={handleModalNavigation}
             variantId={variantId}
             projectId={projectId}
-            historicalComparison={modalHistoricalComparison}
+            comparisonScope={comparisonScope}
+            includeOutdated={includeOutdated}
         ></VulnModal>}
     </div>)
 }
