@@ -13,7 +13,7 @@ from ..models.assessment import APPROVAL_CONTENT_FIELDS, APPROVAL_EDIT_FIELDS
 from ..models.assessment_target import AssessmentTarget, GroupInvariantError
 from ..models.assessment_review import AssessmentReview, fingerprint_assessment
 from ..extensions import db, batch_session, hold_write_lock, write_lock
-from ..models.variant import Variant as DBVariant
+from ..models.variant import Variant as DBVariant, lock_scan_membership
 from ..models.variant_context import VariantContext
 from ..helpers.assessment_risk_links import (
     MAX_SNAPSHOT_BYTES, RiskLinkError, RiskModelIndex, RiskSnapshot, charge_snapshots, describe_links,
@@ -1842,6 +1842,7 @@ def init_app(app: Flask) -> None:
                     variant_ids_to_check = {
                         variant_id for _, targets in prepared for _, variant_id in targets
                     }
+                    lock_scan_membership(variant_ids_to_check)
                     scan_ids = [
                         scan_id for variant_id in variant_ids_to_check
                         for scan_id in active_scan_ids_for_variant(variant_id)

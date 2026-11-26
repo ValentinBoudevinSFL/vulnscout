@@ -23,6 +23,7 @@ from ..models.observation import Observation
 from ..models.package_dependency import PackageDependency
 from ..models.sbom_observation import SBOMObservation
 from ..models.time_estimate import TimeEstimate
+from ..models.variant import lock_scan_membership
 from .package_versions import is_source_revision, package_version_info
 
 logger = logging.getLogger(__name__)
@@ -258,6 +259,8 @@ def consolidate_jsonld_packages(session: Session) -> bool:
                 plans.append((scan_id, group, metadata, supplier))
     if not plans:
         return False
+    # Consolidation can rename member packages and move findings across scans.
+    lock_scan_membership(session=session)
     planned_member_ids = {uuid.UUID(member["package_id"]) for _, group, _, _ in plans for member in group["members"]}
     original_links = [link for link in links if link.package_id in planned_member_ids]
     original_links.extend(session.scalars(

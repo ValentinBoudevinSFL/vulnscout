@@ -454,6 +454,82 @@ def test_current_only_batch_rejects_stale_targets_atomically_but_preserves_legac
     assert client.post(endpoint, json={"assessments": [legacy_item]}).status_code == 200
 
 
+@pytest.mark.parametrize("publication", ["native", "export"])
+def test_postgresql_scan_publication_waits_for_current_only_batch(postgres_app, monkeypatch, publication):
+    from concurrent.futures import ThreadPoolExecutor
+    from queue import Queue
+    from threading import Event
+    from time import monotonic, sleep
+
+    from flask import request
+    from sqlalchemy import text
+
+    from src.models.scan import Scan
+    from src.routes import assessments, scans
+
+    assessments.init_app(postgres_app)
+    scans.init_app(postgres_app)
+    setup_demo_db(postgres_app)
+    with postgres_app.app_context():
+        engine = db.engine
+
+    validated = Event()
+    release = Event()
+    publisher_pid = Queue()
+    find_packages = assessments.finding_packages_for_scans
+
+    def pause_after_read(*args, **kwargs):
+        targets = find_packages(*args, **kwargs)
+        validated.set()
+        assert release.wait(8)
+        return targets
+
+    @postgres_app.before_request
+    def capture_import_connection():
+        if request.path == "/api/scans/import":
+            publisher_pid.put(db.session.scalar(text("SELECT pg_backend_pid()")))
+
+    def publish():
+        if publication == "export":
+            response = postgres_app.test_client().post("/api/scans/import", json={
+                "scan_id": str(uuid.uuid4()), "scan_type": "import_sbom",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "project_name": "demo", "variant_name": "default", "packages": [], "findings": [],
+            })
+            assert response.status_code == 201, response.get_json()
+        else:
+            with postgres_app.app_context():
+                publisher_pid.put(db.session.scalar(text("SELECT pg_backend_pid()")))
+                Scan.create("New SBOM without the package", VARIANT_A)
+
+    payload = {"current_only": True, "assessments": [{
+        "vuln_id": VULN_ID, "status": "fixed",
+        "targets": [{"variant_id": str(VARIANT_A), "package": PKG_A}],
+    }]}
+    client = postgres_app.test_client()
+    monkeypatch.setattr(assessments, "finding_packages_for_scans", pause_after_read)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        batch = executor.submit(client.post, "/api/assessments/batch", json=payload)
+        try:
+            assert validated.wait(5)
+            publisher = executor.submit(publish)
+            pid = publisher_pid.get(timeout=5)
+            deadline = monotonic() + 5
+            with engine.connect() as observer:
+                while not observer.scalar(text("SELECT cardinality(pg_blocking_pids(:pid))"), {"pid": pid}):
+                    assert not publisher.done(), "Scan published before the validated batch committed"
+                    assert monotonic() < deadline, "Publisher did not wait on the variant lock"
+                    sleep(0.01)
+        finally:
+            release.set()
+        assert batch.result().status_code == 200
+        publisher.result()
+
+    stale = client.post("/api/assessments/batch", json=payload)
+    assert stale.status_code == 400
+    assert stale.get_json()["count"] == 0
+
+
 def test_vulnerability_assessments_endpoint_carries_target_pairs(app, client):
     """This endpoint feeds the vuln modal's per-variant status matrix."""
     with app.app_context():
