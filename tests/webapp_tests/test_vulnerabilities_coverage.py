@@ -1072,6 +1072,13 @@ def test_vulnerabilities_include_outdated_is_opt_in_and_scoped(app, client):
     ]
     assert outdated["CVE-OUTDATED-NOTES"]["packages"] == []
     assert outdated["CVE-OUTDATED-NOTES"]["packages_status_by_variant"] == {}
+    notes_details = client.get(
+        f"/api/vulnerabilities/CVE-OUTDATED-NOTES?variant_id={variant_id}&include_outdated=true"
+    )
+    assert notes_details.status_code == 200
+    notes = notes_details.get_json()
+    assert notes["packages"] == notes["packages_current"] == []
+    assert notes["packages_status_by_variant"] == notes["packages_current_by_variant"] == {}
 
     search_payload = {
         "vulnerability_ids": ["CVE-OUTDATED-ONLY-0001"],
@@ -1119,6 +1126,7 @@ def test_outdated_comparison_recomputes_difference_union_and_intersection(app, c
         compare = Variant.create("OutdatedCompare", project.id)
         third = Variant.create("OutdatedThird", project.id)
         sibling = Variant.create("OutdatedUnselected", project.id)
+        outside = Variant.create("Outside", Project.create("OutsideComparisonProject").id)
 
         vulnerabilities = {
             key: Vulnerability.create_record(
@@ -1141,6 +1149,7 @@ def test_outdated_comparison_recomputes_difference_union_and_intersection(app, c
                 ("compare_only", "compare-only", "1.0"),
                 ("base_only", "base-only", "1.0"),
                 ("sibling_only", "sibling-only", "1.0"),
+                ("outside", "outside-only", "1.0"),
             ]
         }
         db.session.commit()
@@ -1156,6 +1165,8 @@ def test_outdated_comparison_recomputes_difference_union_and_intersection(app, c
              ["shared"]),
             ("sibling_current", sibling, datetime(2024, 6, 1, tzinfo=timezone.utc),
              ["sibling_only"]),
+            ("outside_current", outside, datetime(2024, 6, 1, tzinfo=timezone.utc),
+             ["outside"]),
         ]
         scans = {}
         documents = {}
@@ -1197,6 +1208,7 @@ def test_outdated_comparison_recomputes_difference_union_and_intersection(app, c
             ("compare_current", "compare_only", "compare"),
             ("third_tool", "shared", "shared"),
             ("sibling_current", "sibling_only", "sibling"),
+            ("outside_current", "outside", "shared"),
         ]
         for scan_key, package_key, vulnerability_key in observation_specs:
             finding = Finding.get_or_create(
@@ -1261,7 +1273,7 @@ def test_outdated_comparison_recomputes_difference_union_and_intersection(app, c
     shared_id = "CVE-OUTDATED-COMPARE-SHARED"
     for scope, expected in (
         (f"variant_id={base_id}&compare_variant_id={compare_id}&operation=intersection", []),
-        (f"variant_ids={base_id},{compare_id},{third_id}&operation=union", []),
+        (f"project_id={project_id}&variant_ids={base_id},{compare_id},{third_id}&operation=union", []),
         (f"project_id={project_id}", [shared_id]),
     ):
         result = client.post(
@@ -1278,7 +1290,13 @@ def test_outdated_comparison_recomputes_difference_union_and_intersection(app, c
         }
         details = client.get(f"/api/vulnerabilities/{shared_id}?{scope}&include_outdated=true")
         assert details.status_code == 200
-        text_contents = {text["content"] for text in details.get_json()["texts"]}
+        detail = details.get_json()
+        rows = client.get(f"/api/vulnerabilities?{scope}&include_outdated=true").get_json()
+        scoped_row = next(row for row in rows if row["id"] == shared_id)
+        for key in ("packages", "packages_status_by_variant", "packages_current", "packages_current_by_variant"):
+            assert detail[key] == scoped_row[key]
+        assert "outside-only@1.0" not in detail["packages"]
+        text_contents = {text["content"] for text in detail["texts"]}
         assert "basehistoricalterm" in text_contents
         assert ("unselectedterm" in text_contents) == bool(expected)
 
