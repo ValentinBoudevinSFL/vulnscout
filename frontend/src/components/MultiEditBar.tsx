@@ -144,7 +144,7 @@ function MultiEditBar ({vulnerabilities, selectedVulns, resetVulns, appendAssess
                 headers: {
                     'Content-Type': 'application/json'
                 },
-                body: JSON.stringify({ assessments: assessmentRequests })
+                body: JSON.stringify({ current_only: true, assessments: assessmentRequests })
             });
 
             const data = await response.json().catch(() => ({}));

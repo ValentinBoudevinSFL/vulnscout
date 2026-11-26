@@ -292,6 +292,7 @@ SCHEMAS: dict[str, Any] = {
         "Status cannot be supplied, even if unchanged. Omit every field to approve unchanged."
     )),
     "AssessmentBatch": _object({
+        "current_only": {"type": "boolean", "default": False, "description": "Require exact active targets."},
         "assessments": _array(_object({
             **_VEX_FIELDS, "vuln_id": _VULN_ID, "packages": _array(_PACKAGE_ID, minItems=1),
             "variant_id": _UUID, "variant_ids": _array(_UUID, minItems=1), "timestamp": _STRING,

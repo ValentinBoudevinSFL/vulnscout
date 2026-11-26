@@ -840,6 +840,8 @@ def test_vulnerability_comparison_validates_project_scope(app, client, pair):
             json={"vulnerability_ids": ["CVE-2020-35492"], "terms": ["sample"]},
         )
         assert response.status_code == status
+        response = client.get(f"/api/vulnerabilities/CVE-2020-35492?{query}")
+        assert response.status_code == status
 
 
 # ---------------------------------------------------------------------------
@@ -943,6 +945,9 @@ def test_vulnerabilities_include_outdated_is_opt_in_and_scoped(app, client):
         notes_only = Vulnerability.create_record(
             id="CVE-OUTDATED-NOTES", description="Note without a package", status="high",
         )
+        tool_only_finding_vuln = Vulnerability.create_record(
+            id="CVE-OUTDATED-RETAINED-TOOL", description="Reported by the active tool only", status="high",
+        )
         db.session.commit()
 
         old_only_finding = Finding.get_or_create(old_package.id, old_only.id)
@@ -952,6 +957,7 @@ def test_vulnerabilities_include_outdated_is_opt_in_and_scoped(app, client):
         supplier_finding = Finding.get_or_create(original_supplier.id, old_only.id)
         supplierless_finding = Finding.get_or_create(supplierless_tool.id, old_only.id)
         notes_sibling_finding = Finding.get_or_create(sibling_package.id, notes_only.id)
+        retained_tool_finding = Finding.get_or_create(current_package.id, tool_only_finding_vuln.id)
         db.session.commit()
 
         old_scan = Scan(
@@ -1004,6 +1010,7 @@ def test_vulnerabilities_include_outdated_is_opt_in_and_scoped(app, client):
             Observation(finding_id=shared_old_finding.id, scan_id=old_scan.id),
             Observation(finding_id=shared_old_finding.id, scan_id=stale_tool_scan.id),
             Observation(finding_id=shared_current_finding.id, scan_id=current_scan.id),
+            Observation(finding_id=retained_tool_finding.id, scan_id=stale_tool_scan.id),
             Observation(finding_id=sibling_finding.id, scan_id=sibling_scan.id),
             Observation(finding_id=notes_sibling_finding.id, scan_id=sibling_scan.id),
             SBOMObservation(
@@ -1034,7 +1041,8 @@ def test_vulnerabilities_include_outdated_is_opt_in_and_scoped(app, client):
     current_response = client.get(f"/api/vulnerabilities?variant_id={variant_id}")
     assert current_response.status_code == 200
     current = {item["id"]: item for item in current_response.get_json()}
-    assert set(current) == {"CVE-OUTDATED-SHARED-0001"}
+    retained_id = "CVE-OUTDATED-RETAINED-TOOL"
+    assert set(current) == {"CVE-OUTDATED-SHARED-0001", retained_id}
 
     outdated_response = client.get(
         f"/api/vulnerabilities?variant_id={variant_id}&include_outdated=true"
@@ -1042,8 +1050,9 @@ def test_vulnerabilities_include_outdated_is_opt_in_and_scoped(app, client):
     assert outdated_response.status_code == 200
     outdated = {item["id"]: item for item in outdated_response.get_json()}
     assert set(outdated) == {
-        "CVE-OUTDATED-ONLY-0001", "CVE-OUTDATED-SHARED-0001", "CVE-OUTDATED-NOTES",
+        "CVE-OUTDATED-ONLY-0001", "CVE-OUTDATED-SHARED-0001", "CVE-OUTDATED-NOTES", retained_id,
     }
+    assert outdated[retained_id]["packages_status_by_variant"] == {variant_id: ["outdated-lib@2.0"]}
     assert outdated["CVE-OUTDATED-SHARED-0001"]["packages_current"] == [
         "outdated-lib@2.0",
     ]
@@ -1174,12 +1183,19 @@ def test_outdated_comparison_recomputes_difference_union_and_intersection(app, c
                     package_id=packages[package_key].id,
                 ))
 
+        third_tool = Scan(
+            variant_id=third.id, scan_type="tool", scan_source="osv",
+            timestamp=datetime(2024, 3, 1, tzinfo=timezone.utc),
+        )
+        db.session.add(third_tool)
+        db.session.flush()
+        scans["third_tool"] = third_tool
         observation_specs = [
             ("base_old", "shared", "shared"),
             ("base_old", "base_only", "base"),
             ("compare_current", "shared", "shared"),
             ("compare_current", "compare_only", "compare"),
-            ("third_current", "shared", "shared"),
+            ("third_tool", "shared", "shared"),
             ("sibling_current", "sibling_only", "sibling"),
         ]
         for scan_key, package_key, vulnerability_key in observation_specs:
@@ -1260,6 +1276,19 @@ def test_outdated_comparison_recomputes_difference_union_and_intersection(app, c
             "basehistoricalterm": [shared_id],
             "unselectedterm": expected,
         }
+        details = client.get(f"/api/vulnerabilities/{shared_id}?{scope}&include_outdated=true")
+        assert details.status_code == 200
+        text_contents = {text["content"] for text in details.get_json()["texts"]}
+        assert "basehistoricalterm" in text_contents
+        assert ("unselectedterm" in text_contents) == bool(expected)
+
+    for scope in (f"variant_id={base_id}&compare_variant_id={compare_id}",
+                  f"variant_ids={compare_id},{base_id},{third_id}&operation=difference"):
+        details = client.get(f"/api/vulnerabilities/{shared_id}?{scope}&include_outdated=true")
+        assert details.status_code == 200
+        text_contents = {text["content"] for text in details.get_json()["texts"]}
+        assert "basehistoricalterm" not in text_contents
+        assert "unselectedterm" not in text_contents
 
 
 def test_get_vulnerability_by_id_with_variant_scope(app, client):

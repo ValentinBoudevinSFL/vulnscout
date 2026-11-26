@@ -223,6 +223,15 @@ def test_openapi_spec_documents_context_and_vulnerability_helpers(client):
     }
     assert parameters["include_outdated"]["required"] is False
     assert parameters["include_outdated"]["schema"]["type"] == "boolean"
+    details = data["paths"]["/api/vulnerabilities/{id}"]["get"]
+    detail_parameters = {parameter["name"]: parameter for parameter in details["parameters"]}
+    for name in ("variant_ids", "compare_variant_id", "operation", "include_outdated"):
+        assert detail_parameters[name]["schema"] == parameters[name]["schema"]
+        assert detail_parameters[name]["required"] is False
+    batch = schemas["AssessmentBatch"]
+    assert "current_only" not in batch["required"]
+    assert batch["properties"]["current_only"]["type"] == "boolean"
+    assert batch["properties"]["current_only"]["default"] is False
 
 
 def test_complete_spec_validates_against_openapi_30(client):

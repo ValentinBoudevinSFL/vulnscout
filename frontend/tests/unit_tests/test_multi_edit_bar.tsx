@@ -355,7 +355,9 @@ describe('MultiEditBar', () => {
         expect(mockAppendAssessment).toHaveBeenCalled();
         expect(mockPatchVuln).not.toHaveBeenCalled();
         expect(mockResetVulns).toHaveBeenCalledTimes(1);
-        expect(JSON.parse(fetchMock.mock.calls[0][1]?.body as string).assessments[0].targets).toEqual([
+        const body = JSON.parse(fetchMock.mock.calls[0][1]?.body as string);
+        expect(body.current_only).toBe(true);
+        expect(body.assessments[0].targets).toEqual([
             { variant_id: 'first', package: 'pkg@2' },
             { variant_id: 'second', package: 'pkg@3' },
         ]);

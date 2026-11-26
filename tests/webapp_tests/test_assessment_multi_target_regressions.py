@@ -414,6 +414,46 @@ def test_batch_keeps_exact_target_pairs_when_another_pair_was_observed(app, clie
     assert assessment["targets"] == targets
 
 
+def test_current_only_batch_rejects_stale_targets_atomically_but_preserves_legacy_writes(app, client):
+    from src.models.assessment import Assessment
+    from src.models.scan import Scan
+
+    def assessment_ids():
+        with app.app_context():
+            return {assessment.id for assessment in Assessment.get_by_vulnerability(VULN_ID)}
+
+    with app.app_context():
+        tool_scan = Scan.get_by_id(SCAN_B)
+        assert tool_scan is not None
+        tool_scan.scan_type = "tool"
+        tool_scan.scan_source = "osv"
+        db.session.commit()
+
+    items = [
+        {"vuln_id": VULN_ID, "status": "fixed", "targets": [{"variant_id": str(variant_id), "package": package}]}
+        for variant_id, package in ((VARIANT_B, PKG_B), (VARIANT_A, PKG_A))
+    ]
+    endpoint = "/api/assessments/batch"
+    assert client.post(endpoint, json={"current_only": True, "assessments": items}).status_code == 200
+
+    with app.app_context():
+        Scan.create("New SBOM without the old package", VARIANT_A)
+
+    before = assessment_ids()
+    response = client.post(endpoint, json={"current_only": True, "assessments": items})
+    assert response.status_code == 400
+    assert response.get_json()["count"] == 0
+    assert [error["error"] for error in response.get_json()["errors"]] == [
+        f"Package targets are no longer current: {PKG_A} in {VARIANT_A}",
+    ]
+    assert assessment_ids() == before
+
+    assert client.post(endpoint, json={"assessments": items}).status_code == 200
+    legacy_item = {"vuln_id": VULN_ID, "status": "fixed", "packages": [PKG_A], "variant_id": str(VARIANT_A)}
+    assert client.post(endpoint, json={"current_only": True, "assessments": [legacy_item]}).status_code == 400
+    assert client.post(endpoint, json={"assessments": [legacy_item]}).status_code == 200
+
+
 def test_vulnerability_assessments_endpoint_carries_target_pairs(app, client):
     """This endpoint feeds the vuln modal's per-variant status matrix."""
     with app.app_context():

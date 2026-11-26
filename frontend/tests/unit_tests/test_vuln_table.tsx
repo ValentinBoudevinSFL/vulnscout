@@ -414,6 +414,49 @@ describe('Vulnerability Table', () => {
         expect(screen.queryByRole('cell', { name: vulnerabilities[0].id })).not.toBeInTheDocument();
     });
 
+    test('keeps historical selection through a local edit and same-scope reload until the row is removed', async () => {
+        const current = vulnerabilities[0];
+        const historical = { ...vulnerabilities[1], id: 'CVE-HISTORICAL-SELECTION' };
+        let pendingReload: ((result: string) => void) | undefined;
+        let loads = 0;
+        fetchMock.mockResponse(request => {
+            if (new URL(request.url).pathname !== '/api/vulnerabilities') return Promise.resolve('[]');
+            if (++loads === 1) return Promise.resolve(JSON.stringify([current, historical]));
+            return new Promise(resolve => { pendingReload = resolve; });
+        });
+        const table = (rows: Vulnerability[], dataRevision: number, variantId = 'variant-1') => (
+            <TableVulnerabilities vulnerabilities={rows} dataRevision={dataRevision} variantId={variantId}
+                appendAssessment={() => {}} appendCVSS={() => null} patchVuln={() => {}} />
+        );
+        const { rerender } = render(table([current], 1));
+        const user = userEvent.setup();
+        await user.click(screen.getByRole('button', { name: 'Show Outdated' }));
+        const cell = await screen.findByRole('cell', { name: historical.id });
+        fireEvent.click(cell, { ctrlKey: true });
+        const bulkEstimate = screen.getByRole('button', { name: /change time estimate/i });
+        expect(bulkEstimate).toBeEnabled();
+
+        rerender(table([{ ...current }], 1));
+        expect(bulkEstimate).toBeEnabled();
+        expect(loads).toBe(1);
+
+        rerender(table([current], 2));
+        await waitFor(() => expect(pendingReload).toBeDefined());
+        expect(screen.getByRole('cell', { name: historical.id })).toBeVisible();
+        expect(bulkEstimate).toBeEnabled();
+        await act(async () => pendingReload?.(JSON.stringify([current])));
+        expect(screen.queryByRole('cell', { name: historical.id })).not.toBeInTheDocument();
+        expect(bulkEstimate).toBeDisabled();
+
+        pendingReload = undefined;
+        rerender(table([current], 3));
+        await waitFor(() => expect(pendingReload).toBeDefined());
+        rerender(table([current], 4, 'variant-2'));
+        await act(async () => pendingReload?.(JSON.stringify([historical])));
+        expect(screen.getByRole('button', { name: 'Show Outdated' })).toBeEnabled();
+        expect(screen.queryByRole('cell', { name: historical.id })).not.toBeInTheDocument();
+    });
+
     test('saving effort from an Outdated row keeps the current row’s package scope', async () => {
         const current = {
             ...vulnerabilities[0], packages: ['scope-lib@2'], packages_current: ['scope-lib@2'],
@@ -1205,6 +1248,41 @@ describe('Vulnerability Table', () => {
         await waitFor(() => {
             expect(screen.getByRole('tooltip').textContent).toContain('Lazily loaded hover description');
         });
+    });
+
+    test('historical comparison uses scoped details in both hover and modal without reusing current hover text', async () => {
+        const compact = { ...vulnerabilities[0], details_loaded: false, texts: [] };
+        fetchMock.mockResponse(async request => {
+            const url = new URL(request.url);
+            if (url.pathname === '/api/vulnerabilities') {
+                return JSON.stringify([{ ...compact, packages_status_by_variant: {} }]);
+            }
+            if (url.pathname === `/api/vulnerabilities/${compact.id}`) {
+                const scoped = url.searchParams.get('variant_ids') === 'first,second'
+                    && url.searchParams.get('operation') === 'union'
+                    && url.searchParams.get('project_id') === 'project-1'
+                    && url.searchParams.get('include_outdated') === 'true';
+                return JSON.stringify({
+                    ...compact, texts: [{ title: 'description', content: scoped ? 'Selected historical text' : 'Current view text' }],
+                });
+            }
+            return '[]';
+        });
+        const { container } = render(<TableVulnerabilities vulnerabilities={[compact]}
+            projectId="project-1" variantIds={['first', 'second']} multiOperation="union"
+            appendAssessment={() => {}} appendCVSS={() => null} patchVuln={() => {}} />);
+        const row = () => container.querySelector('tr.row-with-hover-effect')!;
+        fireEvent.mouseEnter(row());
+        await waitFor(() => expect(screen.getByRole('tooltip')).toHaveTextContent('Current view text'));
+        fireEvent.mouseLeave(row());
+
+        await userEvent.click(screen.getByRole('button', { name: 'Show Outdated' }));
+        await screen.findByRole('button', { name: 'Hide Outdated' });
+        fireEvent.mouseEnter(row());
+        await waitFor(() => expect(screen.getByRole('tooltip')).toHaveTextContent('Selected historical text'));
+        fireEvent.mouseLeave(row());
+        fireEvent.click(screen.getByText(compact.id));
+        await waitFor(() => expect(within(screen.getByRole('dialog')).getByText('Selected historical text')).toBeVisible());
     });
 
     test('filter by severity', async () => {

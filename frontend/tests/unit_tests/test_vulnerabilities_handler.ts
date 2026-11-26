@@ -28,6 +28,7 @@ jest.mock('ae-cvss-calculator', () => {
 });
 
 import Vulnerabilities, {
+  type ComparisonScope,
   buildStatusSummary,
   patchAssessments,
   getTopStatusSummaryLabel,
@@ -122,21 +123,31 @@ describe('Vulnerabilities parsing CVSS branches', () => {
     expect(vuln.severity.cvss[0].attack_vector).toBe('ADJACENT');
   });
 
-  test.each([
+  test.each<[ComparisonScope, Record<string, string>]>([
     [{ baseVariantId: 'base-1', operation: 'intersection' }, {
-      variant_id: 'base-1', compare_variant_id: 'compare-1', operation: 'intersection',
+      variant_id: 'base-1', compare_variant_id: 'compare-1', operation: 'intersection', project_id: 'project-1',
     }],
     [{ variantIds: ['v1', 'v2', 'v3'], multiOperation: 'union' }, {
       variant_ids: 'v1,v2,v3', project_id: 'project-1', operation: 'union',
     }],
-  ])('historical description search forwards the list comparison scope', async (comparison, params) => {
+  ])('historical list, search and details use the same comparison scope', async (comparison, params) => {
     fetchMock.mockResponseOnce(JSON.stringify({ matches: {} }));
+    fetchMock.mockResponseOnce(JSON.stringify(rawVuln()));
+    fetchMock.mockResponseOnce(JSON.stringify([]));
+    const compareId = 'baseVariantId' in comparison ? 'compare-1' : undefined;
     await Vulnerabilities.searchDescriptionTerms(
-      ['CVE-TEST-1'], ['historical'], 'baseVariantId' in comparison ? 'compare-1' : undefined,
-      'project-1', undefined, true, comparison,
+      ['CVE-TEST-1'], ['historical'], compareId, 'project-1', undefined, true, comparison,
     );
-    const url = new URL(fetchMock.mock.calls[0][0] as string);
-    expect(Object.fromEntries(url.searchParams)).toEqual({ include_outdated: 'true', ...params });
+    await Vulnerabilities.getDetails('CVE-TEST-1', compareId, 'project-1', undefined, comparison);
+    await Vulnerabilities.list(
+      comparison.baseVariantId, 'project-1', compareId, comparison.operation,
+      comparison.variantIds, comparison.multiOperation, undefined, true,
+    );
+    for (const [request] of fetchMock.mock.calls) {
+      const url = new URL(request as string);
+      url.searchParams.delete('format');
+      expect(Object.fromEntries(url.searchParams)).toEqual({ include_outdated: 'true', ...params });
+    }
   });
 
   test('preserves unscored CVSS metadata in compact records', async () => {

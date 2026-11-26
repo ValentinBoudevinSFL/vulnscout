@@ -265,7 +265,14 @@ def _historical_sbom_vulnerability_scope(
         return set(), {}, {}, []
 
     scan_ids = _historical_scan_ids(variant_ids)
-    packages_by_vulnerability = _finding_packages_for_scans(scan_ids, historical=True)
+    packages_by_vulnerability = finding_packages_for_scans(scan_ids, historical=True)
+    active_ids = [
+        scan_id for variant_id in variant_ids for scan_id in active_scan_ids_for_variant(variant_id)
+    ]
+    for vulnerability_id, active_targets in finding_packages_for_scans(active_ids).items():
+        historical_targets = packages_by_vulnerability.setdefault(vulnerability_id, {})
+        for variant_key, packages in active_targets.items():
+            historical_targets.setdefault(variant_key, set()).update(packages)
     variants_by_vulnerability: dict[str, set[uuid.UUID]] = {}
     for vulnerability_id, packages_by_variant in packages_by_vulnerability.items():
         variants_by_vulnerability[vulnerability_id] = {uuid.UUID(key) for key in packages_by_variant}
@@ -330,7 +337,7 @@ def _comparison_variants(
     return variant_ids, None
 
 
-def _finding_packages_for_scans(
+def finding_packages_for_scans(
     scan_ids: list[uuid.UUID], vulnerability_ids: typing.Collection[str] | None = None,
     *, historical: bool = False,
 ) -> dict[str, dict[str, set[str]]]:
@@ -377,7 +384,6 @@ def _finding_packages_for_scans(
     if vulnerability_ids is not None:
         query = query.where(Finding.vulnerability_id.in_(vulnerability_ids))
     targets: dict[str, dict[str, set[str]]] = {}
-    active_tool_scans: dict[uuid.UUID, set[uuid.UUID]] = {}
     for row in db.session.execute(query):
         vid, scan_id, variant_id, scan_type, timestamp, package_id, name, version, supplier = row
         target = f"{name}@{version}::{supplier}" if supplier else f"{name}@{version}"
@@ -389,11 +395,7 @@ def _finding_packages_for_scans(
                 # result. Older SBOMs can corroborate only the exact observed package.
                 first_seen = sbom_first_seen.get((variant_id, package_id))
                 if package_id not in documented and (first_seen is None or first_seen > timestamp):
-                    # Expanded results must still include current findings from tool-only variants.
-                    if variant_id not in sbom_variants and variant_id not in active_tool_scans:
-                        active_tool_scans[variant_id] = set(active_scan_ids_for_variant(variant_id))
-                    if scan_id not in active_tool_scans.get(variant_id, ()):
-                        package_targets.clear()
+                    package_targets.clear()
                 if not supplier:
                     package_targets.update(documented)
             elif variant_id in sbom_variants:
@@ -405,6 +407,41 @@ def _finding_packages_for_scans(
         if package_targets:
             targets.setdefault(vid, {}).setdefault(str(variant_id), set()).update(package_targets.values())
     return targets
+
+
+def _historical_text_variants() -> tuple[list[uuid.UUID], ResponseReturnValue | None]:
+    variant_id = request.args.get("variant_id")
+    project_id = request.args.get("project_id")
+    compare_variant_id = request.args.get("compare_variant_id")
+    variant_ids = request.args.get("variant_ids")
+    if compare_variant_id or variant_ids:
+        pair = bool(compare_variant_id)
+        if pair:
+            if not variant_id or not compare_variant_id or variant_ids:
+                return [], ({"error": "Invalid variant comparison scope"}, 400)
+            raw_ids = [("variant_id", variant_id), ("compare_variant_id", compare_variant_id)]
+        else:
+            if variant_id:
+                return [], ({"error": "Invalid variant comparison scope"}, 400)
+            raw_ids = [("variant_ids", value.strip()) for value in (variant_ids or "").split(",") if value.strip()]
+        selected, err = _comparison_variants(raw_ids, project_id)
+        if err is not None:
+            return [], err
+        operation = request.args.get("operation", "difference" if pair else "union")
+        variant_scope = _comparison_evidence_variants(selected, operation, pair=pair)
+    elif variant_id:
+        variant_uuid, err = parse_uuid_or_400(variant_id, "variant_id")
+        if err is not None or variant_uuid is None:
+            return [], err if err is not None else ({"error": "Internal error"}, 500)
+        variant_scope = [variant_uuid]
+    elif project_id:
+        project_uuid, err = parse_uuid_or_400(project_id, "project_id")
+        if err is not None or project_uuid is None:
+            return [], err if err is not None else ({"error": "Internal error"}, 500)
+        variant_scope = [variant.id for variant in Variant.get_by_project(project_uuid)]
+    else:
+        variant_scope = list(db.session.scalars(db.select(Variant.id)))
+    return variant_scope, None
 
 
 def _populate_found_by(
@@ -1095,7 +1132,7 @@ def init_app(app: Flask) -> None:
                     scan_id for variant_key in outdated_variant_ids
                     for scan_id in active_scan_ids_for_variant(variant_key)
                 ]
-            current_targets = _finding_packages_for_scans([*target_scan_ids, *base_target_scan_ids], vuln_ids)
+            current_targets = finding_packages_for_scans([*target_scan_ids, *base_target_scan_ids], vuln_ids)
             for vuln_id, vuln in vulns.items():
                 targets = current_targets.get(vuln_id, {})
                 vuln["packages_current_by_variant"] = {
@@ -1226,45 +1263,26 @@ def init_app(app: Flask) -> None:
         scan_ids: list[uuid.UUID] | None = None
         variant_id = request.args.get("variant_id")
         project_id = request.args.get("project_id")
-        compare_variant_id = request.args.get("compare_variant_id")
-        variant_ids = request.args.get("variant_ids")
         include_outdated = request.args.get("include_outdated", "").lower() in ("1", "true", "yes")
-        pair = bool(variant_id and compare_variant_id)
-        if include_outdated and (pair or variant_ids):
-            raw_ids = (
-                [("variant_id", variant_id), ("compare_variant_id", compare_variant_id)]
-                if variant_id and compare_variant_id else
-                [("variant_ids", value.strip()) for value in (variant_ids or "").split(",") if value.strip()]
-            )
-            parsed_ids, err = _comparison_variants(raw_ids, project_id)
+        if include_outdated:
+            historical_variants, err = _historical_text_variants()
             if err is not None:
                 return err
-            operation = request.args.get("operation", "difference" if pair else "union")
-            scan_ids = _historical_scan_ids(
-                _comparison_evidence_variants(parsed_ids, operation, pair=pair),
-            )
+            scan_ids = _historical_scan_ids(historical_variants)
         elif variant_id:
             variant_uuid, err = parse_uuid_or_400(variant_id, "variant_id")
             if err:
                 return err
             if variant_uuid is None:
                 return {"error": "Internal error"}, 500
-            scan_ids = (
-                _historical_scan_ids([variant_uuid])
-                if include_outdated
-                else active_scan_ids_for_variant(variant_uuid)
-            )
+            scan_ids = active_scan_ids_for_variant(variant_uuid)
         elif project_id:
             project_uuid, err = parse_uuid_or_400(project_id, "project_id")
             if err:
                 return err
             if project_uuid is None:
                 return {"error": "Internal error"}, 500
-            scan_ids = (
-                _historical_scan_ids([variant.id for variant in Variant.get_by_project(project_uuid)])
-                if include_outdated
-                else active_scan_ids_for_project(project_uuid)
-            )
+            scan_ids = active_scan_ids_for_project(project_uuid)
 
         description_rows = db.session.execute(
             db.select(Vulnerability.id, Vulnerability.description)
@@ -1306,8 +1324,13 @@ def init_app(app: Flask) -> None:
         OpenAPI:
         query variant_id uuid optional Apply variant-scoped CVSS and effort overrides.
         query project_id uuid optional Scope vulnerability texts to one project when variant_id is absent.
+        query compare_variant_id uuid optional Select the second variant in a historical comparison.
+        query variant_ids string optional Comma-separated variants in a historical comparison.
+        query operation string optional Select the historical comparison operation.
+        query include_outdated boolean optional Use the historical list's scope for SBOM texts.
         query agent_scoped string optional When '1', require active variant membership and return scoped packages.
         response 200 Vulnerability Vulnerability payload.
+        response 400 Error Invalid historical comparison scope.
         response 404 Error Vulnerability not found.
         response 404 html Missing vulnerability record.
         """
@@ -1318,15 +1341,32 @@ def init_app(app: Flask) -> None:
         variant_id = request.args.get("variant_id")
         project_id = request.args.get("project_id")
         response = record.to_dict()
+        include_outdated = request.args.get("include_outdated", "").lower() in ("1", "true", "yes")
+        agent_scoped = request.args.get("agent_scoped") == "1"
         text_variant_ids: list[uuid.UUID] | None = None
         text_scan_ids: list[uuid.UUID] | None = None
-        if variant_id:
+        if include_outdated and not agent_scoped:
+            historical_variants, err = _historical_text_variants()
+            if err is not None:
+                return err
+            text_scan_ids = _historical_scan_ids(historical_variants)
+            if request.args.get("compare_variant_id"):
+                # Pair comparisons display the compared variant's metrics and effort.
+                overrides = _variant_scoped_metrics_and_effort_overrides([record], historical_variants[-1])
+                _apply_variant_scoped_overrides_to_vuln_dicts({response["id"]: response}, overrides)
+            elif variant_id or request.args.get("variant_ids"):
+                overrides = _scoped_metrics_and_effort_overrides([record], historical_variants)
+                _apply_variant_scoped_overrides_to_vuln_dicts({response["id"]: response}, overrides)
+            elif project_id:
+                metrics = [m for m in record.metrics if m.variant_id is None or m.variant_id in historical_variants]
+                _apply_scoped_cvss_to_vuln_dict(response, metrics, record.status)
+        elif variant_id:
             variant_uuid, err = parse_uuid_or_400(variant_id, "variant_id")
             if err:
                 return err
             if variant_uuid is None:
                 return {"error": "Internal error"}, 500
-            if request.args.get("agent_scoped") == "1":
+            if agent_scoped:
                 active_ids = active_scan_ids_for_variant(variant_uuid)
                 text_scan_ids = active_ids
                 package_ids = active_package_ids_for_scans(active_ids)
@@ -1377,9 +1417,6 @@ def init_app(app: Flask) -> None:
                 )
             ).scalars().all()
             _apply_scoped_cvss_to_vuln_dict(response, scoped_metrics, record.status)
-        else:
-            variant_uuid = None
-
         vuln_texts = fetch_vulnerabilities_texts(
             [id],
             variant_ids=text_variant_ids,

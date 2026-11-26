@@ -366,6 +366,13 @@ const asVulnerability = (data: any): Vulnerability | [] => {
     return vuln
 }
 
+export type ComparisonScope = {
+    baseVariantId?: string;
+    operation?: string;
+    variantIds?: string[];
+    multiOperation?: string;
+};
+
 function setScopeParams(
     params: URLSearchParams, variantId?: string, projectId?: string, compareVariantId?: string,
     operation?: string, variantIds?: string[], multiOperation?: string,
@@ -383,6 +390,18 @@ function setScopeParams(
     } else if (projectId) {
         params.set('project_id', projectId);
     }
+}
+
+function setHistoricalScopeParams(
+    params: URLSearchParams, variantId?: string, projectId?: string, comparison?: ComparisonScope,
+) {
+    params.set('include_outdated', 'true');
+    setScopeParams(
+        params, comparison?.baseVariantId ?? variantId, projectId,
+        comparison?.baseVariantId ? variantId : undefined, comparison?.operation,
+        comparison?.variantIds, comparison?.multiOperation,
+    );
+    if (comparison?.baseVariantId && variantId && projectId) params.set('project_id', projectId);
 }
 
 class Vulnerabilities {
@@ -432,8 +451,11 @@ class Vulnerabilities {
     static async list(variantId?: string, projectId?: string, compareVariantId?: string, operation?: string, variantIds?: string[], multiOperation?: string, signal?: AbortSignal, includeOutdated = false): Promise<Vulnerability[]> {
         const url = new URL(import.meta.env.VITE_API_URL + "/api/vulnerabilities", window.location.href);
         url.searchParams.set('format', 'compact');
-        if (includeOutdated) url.searchParams.set('include_outdated', 'true');
         setScopeParams(url.searchParams, variantId, projectId, compareVariantId, operation, variantIds, multiOperation);
+        if (includeOutdated) {
+            url.searchParams.set('include_outdated', 'true');
+            if (variantId && compareVariantId && projectId) url.searchParams.set('project_id', projectId);
+        }
         const response = await fetch(url.toString(), {
             mode: "cors",
             signal,
@@ -447,16 +469,14 @@ class Vulnerabilities {
         variantId?: string,
         projectId?: string,
         signal?: AbortSignal,
+        historicalComparison?: ComparisonScope,
     ): Promise<Vulnerability | null> {
         const url = new URL(
             import.meta.env.VITE_API_URL + `/api/vulnerabilities/${encodeURIComponent(vulnId)}`,
             window.location.href,
         );
-        if (variantId) {
-            url.searchParams.set('variant_id', variantId);
-        } else if (projectId) {
-            url.searchParams.set('project_id', projectId);
-        }
+        if (historicalComparison) setHistoricalScopeParams(url.searchParams, variantId, projectId, historicalComparison);
+        else setScopeParams(url.searchParams, variantId, projectId);
         const response = await fetch(url.toString(), { mode: 'cors', signal });
         if (!response.ok) {
             throw new Error(`Failed to load vulnerability details (${response.status})`);
@@ -472,24 +492,14 @@ class Vulnerabilities {
         projectId?: string,
         signal?: AbortSignal,
         includeOutdated = false,
-        comparison?: {
-            baseVariantId?: string;
-            operation?: string;
-            variantIds?: string[];
-            multiOperation?: string;
-        },
+        comparison?: ComparisonScope,
     ): Promise<Record<string, string[]>> {
         const url = new URL(
             import.meta.env.VITE_API_URL + '/api/vulnerabilities/search-descriptions',
             window.location.href,
         );
         if (includeOutdated) {
-            url.searchParams.set('include_outdated', 'true');
-            setScopeParams(
-                url.searchParams, comparison?.baseVariantId ?? variantId, projectId,
-                comparison?.baseVariantId ? variantId : undefined, comparison?.operation,
-                comparison?.variantIds, comparison?.multiOperation,
-            );
+            setHistoricalScopeParams(url.searchParams, variantId, projectId, comparison);
         } else {
             setScopeParams(url.searchParams, variantId, projectId);
         }

@@ -35,6 +35,7 @@ import RangeSlider from "../components/RangeSlider";
 
 type Props = {
     vulnerabilities: Vulnerability[];
+    dataRevision?: number;
     appendAssessment: (added: Assessment) => void;
     appendCVSS: (vulnId: string, vector: string) => CVSS | null;
     patchVuln: (vulnId: string, patch: VulnerabilityPatch) => void;
@@ -339,8 +340,12 @@ const DEFAULT_VISIBLE_COLUMNS = [
     'ID', 'Severity', 'EU KEV', 'EPSS Score', 'SBOM Affected', 'Variants', 'Status', 'Last Assessed',
 ];
 
-function TableVulnerabilities ({ vulnerabilities, filterLabel, filterValue, filterVulnerabilityIds, preferenceScopeKey = 'unscoped', appendAssessment, appendCVSS, patchVuln, variantId, projectId, baseVariantId, compareOperation, variantIds, multiOperation, missingEuvdDataBannerDismissed, onMissingEuvdDataBannerDismissedChange, missingPublishedDateDataBannerDismissed, onMissingPublishedDateDataBannerDismissedChange, onAgentContextChange }: Readonly<Props>) {
+function TableVulnerabilities ({ vulnerabilities, dataRevision, filterLabel, filterValue, filterVulnerabilityIds, preferenceScopeKey = 'unscoped', appendAssessment, appendCVSS, patchVuln, variantId, projectId, baseVariantId, compareOperation, variantIds, multiOperation, missingEuvdDataBannerDismissed, onMissingEuvdDataBannerDismissedChange, missingPublishedDateDataBannerDismissed, onMissingPublishedDateDataBannerDismissedChange, onAgentContextChange }: Readonly<Props>) {
     const preferenceKey = `vulnscout.tables.vulnerabilities.${encodeURIComponent(preferenceScopeKey)}`;
+    const comparisonScope = useMemo(() => ({
+        baseVariantId, operation: compareOperation, variantIds, multiOperation,
+    }), [baseVariantId, compareOperation, variantIds, multiOperation]);
+    const evidenceScopeKey = JSON.stringify([variantId, projectId, comparisonScope]);
 
     const docUrl = useDocUrl("interactive-mode.html#vulnerability-table");
     const [modalVuln, setModalVuln] = useState<Vulnerability|undefined>(undefined);
@@ -349,14 +354,17 @@ function TableVulnerabilities ({ vulnerabilities, filterLabel, filterValue, filt
     const [modalDetailsLoading, setModalDetailsLoading] = useState(false);
     const [modalDetailsError, setModalDetailsError] = useState(false);
     const hoverDetailsCache = useRef(new Map<string, Vulnerability>());
+    const modalHistoricalComparison = modalVuln?.packages_status_by_variant === undefined ? undefined : comparisonScope;
 
     const loadHoverDetails = useCallback(async (summary: Vulnerability): Promise<Vulnerability> => {
         if (summary.details_loaded !== false) return summary;
-        const cacheKey = `${summary.id}:${variantId ?? ''}:${projectId ?? ''}`;
-        const cached = hoverDetailsCache.current.get(cacheKey);
-        if (cached) return cached;
-        const details = await Vulnerabilities.getDetails(summary.id, variantId, projectId);
-        const resolved = details ? {
+        const historical = summary.packages_status_by_variant !== undefined;
+        const cacheKey = JSON.stringify([summary.id, evidenceScopeKey, historical, dataRevision]);
+        const details = hoverDetailsCache.current.get(cacheKey) ?? await (historical
+            ? Vulnerabilities.getDetails(summary.id, variantId, projectId, undefined, comparisonScope)
+            : Vulnerabilities.getDetails(summary.id, variantId, projectId));
+        if (details) hoverDetailsCache.current.set(cacheKey, details);
+        return details ? {
             ...summary,
             texts: details.texts,
             urls: details.urls,
@@ -364,9 +372,7 @@ function TableVulnerabilities ({ vulnerabilities, filterLabel, filterValue, filt
             severity: { ...summary.severity, cvss: details.severity.cvss },
             details_loaded: true,
         } : { ...summary, details_loaded: true };
-        hoverDetailsCache.current.set(cacheKey, resolved);
-        return resolved;
-    }, [variantId, projectId]);
+    }, [variantId, projectId, comparisonScope, evidenceScopeKey, dataRevision]);
 
     useEffect(() => {
         if (!modalVuln || modalVuln.details_loaded !== false) {
@@ -379,7 +385,10 @@ function TableVulnerabilities ({ vulnerabilities, filterLabel, filterValue, filt
         const vulnId = modalVuln.id;
         setModalDetailsLoading(true);
         setModalDetailsError(false);
-        Vulnerabilities.getDetails(vulnId, variantId, projectId, controller.signal)
+        const detailsRequest = modalHistoricalComparison
+            ? Vulnerabilities.getDetails(vulnId, variantId, projectId, controller.signal, modalHistoricalComparison)
+            : Vulnerabilities.getDetails(vulnId, variantId, projectId, controller.signal);
+        detailsRequest
             .then((details) => {
                 if (!details || controller.signal.aborted) return;
                 const mergeDetails = (summary: Vulnerability): Vulnerability => ({
@@ -410,7 +419,7 @@ function TableVulnerabilities ({ vulnerabilities, filterLabel, filterValue, filt
             });
 
         return () => controller.abort();
-    }, [modalVuln, variantId, projectId]);
+    }, [modalVuln, variantId, projectId, modalHistoricalComparison]);
     const [isEditing, setIsEditing] = useState<boolean>(false);
     // A filter jump (e.g. "Show Vulnerabilities" from the packages table) remounts this
     // component with filterLabel/filterValue set. The effect below resets every other
@@ -463,9 +472,9 @@ function TableVulnerabilities ({ vulnerabilities, filterLabel, filterValue, filt
     const [showSearchHelper, setShowSearchHelper] = useState(false);
     const [showMoreFilters, setShowMoreFilters] = useState(false);
     const [includeOutdated, setIncludeOutdated] = useState(false);
-    const [outdatedVulnerabilities, setOutdatedVulnerabilities] = useState<Vulnerability[] | null>(null);
+    const [outdatedDataset, setOutdatedDataset] = useState<{ scope: string; rows: Vulnerability[] } | null>(null);
     const [outdatedLoading, setOutdatedLoading] = useState(false);
-    const includeOutdatedRef = useRef(includeOutdated);
+    const outdatedEditRevision = useRef(0);
     const [aiSuggestionFilter, setAiSuggestionFilter] = useLocalStorageState<'any' | 'has' | 'no'>(`${preferenceKey}.aiSuggestion`, 'any', { skipInitialRead: isFilterJump });
     const [aiSuggestionVulnIds, setAiSuggestionVulnIds] = useState<Set<string>>(new Set());
 
@@ -478,20 +487,21 @@ function TableVulnerabilities ({ vulnerabilities, filterLabel, filterValue, filt
     const moreFiltersRef = useRef<HTMLDivElement>(null);
     const outdatedRequestRef = useRef<AbortController | null>(null);
 
-    const showingOutdated = includeOutdated && outdatedVulnerabilities !== null;
-    const tableVulnerabilities = showingOutdated
-        ? outdatedVulnerabilities
-        : vulnerabilities;
+    const outdatedRows = outdatedDataset?.scope === evidenceScopeKey ? outdatedDataset.rows : null;
+    const showingOutdated = includeOutdated && outdatedRows !== null;
+    const tableVulnerabilities = showingOutdated ? outdatedRows : vulnerabilities;
 
-    const toggleOutdated = useCallback(async (checked: boolean) => {
+    const toggleOutdated = useCallback(async function loadOutdated(checked: boolean) {
         if (!checked) {
             outdatedRequestRef.current?.abort();
+            outdatedRequestRef.current = null;
             setOutdatedLoading(false);
             setIncludeOutdated(false);
             return;
         }
 
         const controller = new AbortController();
+        const editRevision = outdatedEditRevision.current;
         outdatedRequestRef.current?.abort();
         outdatedRequestRef.current = controller;
         setOutdatedLoading(true);
@@ -516,33 +526,45 @@ function TableVulnerabilities ({ vulnerabilities, filterLabel, filterValue, filt
                 Promise.all(assessmentRequests),
             ]);
             if (controller.signal.aborted) return;
-            setOutdatedVulnerabilities(Vulnerabilities.enrich_with_assessments(
-                allVulnerabilities,
-                removeDuplicateAssessments(assessmentGroups.flat()),
-            ));
+            if (editRevision !== outdatedEditRevision.current) {
+                void loadOutdated(true);
+                return;
+            }
+            setOutdatedDataset({
+                scope: evidenceScopeKey,
+                rows: Vulnerabilities.enrich_with_assessments(
+                    allVulnerabilities, removeDuplicateAssessments(assessmentGroups.flat()),
+                ),
+            });
             setIncludeOutdated(true);
         } catch {
             if (!controller.signal.aborted) {
-                setIncludeOutdated(false);
                 setGeneralBanner({ message: 'Failed to load outdated vulnerabilities', type: 'error' });
             }
         } finally {
-            if (!controller.signal.aborted) setOutdatedLoading(false);
+            if (outdatedRequestRef.current === controller) {
+                outdatedRequestRef.current = null;
+                if (!controller.signal.aborted) setOutdatedLoading(false);
+            }
         }
-    }, [baseVariantId, compareOperation, multiOperation, projectId, variantId, variantIds]);
+    }, [baseVariantId, compareOperation, multiOperation, projectId, variantId, variantIds, evidenceScopeKey]);
 
-    const toggleOutdatedRef = useRef(toggleOutdated);
-    const previousVulnerabilitiesRef = useRef(vulnerabilities);
+    const previousEvidence = useRef({ scope: evidenceScopeKey, revision: dataRevision });
     useEffect(() => {
-        includeOutdatedRef.current = includeOutdated;
-        toggleOutdatedRef.current = toggleOutdated;
-    }, [includeOutdated, toggleOutdated]);
-    useEffect(() => {
-        if (previousVulnerabilitiesRef.current === vulnerabilities) return;
-        previousVulnerabilitiesRef.current = vulnerabilities;
-        setOutdatedVulnerabilities(null);
-        if (includeOutdatedRef.current) void toggleOutdatedRef.current(true);
-    }, [vulnerabilities]);
+        const previous = previousEvidence.current;
+        previousEvidence.current = { scope: evidenceScopeKey, revision: dataRevision };
+        if (previous.scope !== evidenceScopeKey) {
+            void toggleOutdated(false);
+            setOutdatedDataset(null);
+            setSelectedRows({});
+            setModalVuln(undefined);
+            setModalVulnSnapshot([]);
+            hoverDetailsCache.current.clear();
+        } else if (previous.revision !== dataRevision) {
+            hoverDetailsCache.current.clear();
+            if (includeOutdated || outdatedRequestRef.current) void toggleOutdated(true);
+        }
+    }, [dataRevision, evidenceScopeKey, includeOutdated, toggleOutdated]);
 
     useEffect(() => () => outdatedRequestRef.current?.abort(), []);
 
@@ -772,18 +794,20 @@ function TableVulnerabilities ({ vulnerabilities, filterLabel, filterValue, filt
 
     const handlePatchVuln = useCallback((vulnId: string, patch: VulnerabilityPatch) => {
         patchVuln(vulnId, patch);
+        outdatedEditRevision.current++;
         const update = (v: Vulnerability) => v.id !== vulnId ? v : typeof patch === 'function' ? patch(v) : patch;
-        setOutdatedVulnerabilities(current => current?.map(update) ?? null);
+        setOutdatedDataset(current => current?.scope === evidenceScopeKey
+            ? { ...current, rows: current.rows.map(update) } : current);
         setModalVuln(prev => prev && update(prev));
         setModalVulnSnapshot(prev => prev.map(update));
-    }, [patchVuln]);
+    }, [patchVuln, evidenceScopeKey]);
 
     const handleAppendAssessment = useCallback((assessment: Assessment) => {
         appendAssessment(assessment);
-        setOutdatedVulnerabilities(current => current
-            ? Vulnerabilities.append_assessment(current, assessment)
-            : current);
-    }, [appendAssessment]);
+        outdatedEditRevision.current++;
+        setOutdatedDataset(current => current?.scope === evidenceScopeKey
+            ? { ...current, rows: Vulnerabilities.append_assessment(current.rows, assessment) } : current);
+    }, [appendAssessment, evidenceScopeKey]);
 
     const columnDisplayNames = useMemo(() => ({
         'select-checkbox': 'Select',
@@ -1479,7 +1503,7 @@ function TableVulnerabilities ({ vulnerabilities, filterLabel, filterValue, filt
                 projectId,
                 controller.signal,
                 showingOutdated,
-                { baseVariantId, operation: compareOperation, variantIds, multiOperation },
+                comparisonScope,
             );
             if (controller.signal.aborted) return;
             setDescriptionMatches(Object.fromEntries(
@@ -1494,8 +1518,7 @@ function TableVulnerabilities ({ vulnerabilities, filterLabel, filterValue, filt
         } finally {
             if (!controller.signal.aborted) setDescriptionSearchLoading(false);
         }
-    }, [draftSearch, tableVulnerabilities, variantId, projectId, setSearch, showingOutdated,
-        baseVariantId, compareOperation, variantIds, multiOperation]);
+    }, [draftSearch, tableVulnerabilities, variantId, projectId, setSearch, showingOutdated, comparisonScope]);
 
     const applySearchRef = useRef(applySearch);
     applySearchRef.current = applySearch;
@@ -2034,6 +2057,7 @@ function TableVulnerabilities ({ vulnerabilities, filterLabel, filterValue, filt
             onNavigate={handleModalNavigation}
             variantId={variantId}
             projectId={projectId}
+            historicalComparison={modalHistoricalComparison}
         ></VulnModal>}
     </div>)
 }

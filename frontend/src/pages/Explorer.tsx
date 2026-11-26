@@ -739,6 +739,7 @@ function Explorer() {
                         appendCVSS={appendCVSS}
                         patchVuln={patchVuln}
                         vulnerabilities={vulns}
+                        dataRevision={dataRevision}
                         preferenceScopeKey={tablePreferenceScopeKey}
                         filterLabel={vulnFilter?.label}
                         filterValue={vulnFilter?.value}

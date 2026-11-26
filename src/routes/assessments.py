@@ -36,6 +36,7 @@ from ..helpers.assessment_io import (
 )
 from ..helpers.assessment_staleness import annotate_assessments_outdated
 from ..controllers.assessment_targets import annotate_targets
+from ..helpers.active_scans import active_scan_ids_for_variant
 from ._assessment_write import (
     apply_reconcile,
     create_assessment_record,
@@ -47,6 +48,7 @@ from ._assessment_write import (
     resolve_targets,
     validate_deletions,
 )
+from .vulnerabilities import finding_packages_for_scans
 
 from flask import request, Flask
 from flask.typing import ResponseReturnValue
@@ -1709,20 +1711,25 @@ def init_app(app: Flask) -> None:
         payload_data = request.get_json()
         if not payload_data or "assessments" not in payload_data or not isinstance(payload_data["assessments"], list):
             return {"error": "Invalid request data. Expected: {assessments: [...]}"}, 400
+        current_only = payload_data.get("current_only", False)
+        if not isinstance(current_only, bool):
+            return {"error": "current_only must be a boolean"}, 400
 
         errors: list[dict[str, Any]] = []
-        prepared: list[tuple[DBAssessment, list[tuple[UUID, UUID]]]] = []
+        prepared: list[tuple[DBAssessment, dict[tuple[str, UUID], Finding]]] = []
         pkg_cache: dict[str, Package] = {}
 
-        # Validate the complete request before opening the write transaction.
-        # A batch represents one user action, so one invalid package/variant
-        # relationship must cancel every assessment in that action.
+        # Resolve the entire batch before writing any assessments. Current-only
+        # eligibility is rechecked under the write lock just before persisting.
         for item in payload_data["assessments"]:
             if not isinstance(item, dict) or "vuln_id" not in item:
                 errors.append({"error": "Invalid assessment data", "item": item})
                 continue
 
             exact_targets: set[tuple[str, UUID]] | None = None
+            if current_only and "targets" not in item:
+                errors.append({"vuln_id": item.get("vuln_id"), "error": "current_only requires exact targets"})
+                continue
             if "targets" in item:
                 exact_targets = _parse_batch_targets(item["targets"])
                 if not exact_targets:
@@ -1812,13 +1819,9 @@ def init_app(app: Flask) -> None:
                     + ", ".join(unobserved),
                 })
                 continue
-            item_targets = [
-                (variant_id, finding.id)
-                for (_package, variant_id), finding in resolved.items()
-            ]
-            prepared.append((assessment, item_targets))
+            prepared.append((assessment, resolved))
 
-        if errors:
+        def invalid_batch() -> ResponseReturnValue:
             return {
                 "status": "error",
                 "assessments": [],
@@ -1828,15 +1831,44 @@ def init_app(app: Flask) -> None:
                 "error_count": len(errors),
             }, 400
 
+        if errors:
+            return invalid_batch()
+
         results: list[AssessmentDict] = []
         try:
             with batch_session():
+                if current_only:
+                    _lock_target_writes()
+                    variant_ids_to_check = {
+                        variant_id for _, targets in prepared for _, variant_id in targets
+                    }
+                    scan_ids = [
+                        scan_id for variant_id in variant_ids_to_check
+                        for scan_id in active_scan_ids_for_variant(variant_id)
+                    ]
+                    current = finding_packages_for_scans(
+                        scan_ids, {finding.vulnerability_id for _, targets in prepared for finding in targets.values()}
+                    )
+                    for assessment, targets in prepared:
+                        stale = sorted(
+                            f"{package} in {variant_id}"
+                            for (package, variant_id), finding in targets.items()
+                            if package not in current.get(finding.vulnerability_id, {}).get(str(variant_id), ())
+                        )
+                        if stale:
+                            errors.append({
+                                "vuln_id": assessment.vuln_id,
+                                "error": "Package targets are no longer current: " + ", ".join(stale),
+                            })
+                    if errors:
+                        return invalid_batch()
                 # A batch is one user action but may span several CVEs,
                 # several projects and several distinct contents. Each item
                 # creates exactly one row covering every package in that
                 # item; batching never fuses separate items together.
                 created_rows: list[DBAssessment] = []
-                for assessment, item_targets in prepared:
+                for assessment, targets in prepared:
+                    item_targets = [(variant_id, finding.id) for (_, variant_id), finding in targets.items()]
                     created_rows.append(create_assessment_record(
                         assessment, item_targets,
                         timestamp=getattr(assessment, "timestamp", None),

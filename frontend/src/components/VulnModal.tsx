@@ -1,4 +1,4 @@
-import type { Vulnerability, VulnerabilityPatch } from "../handlers/vulnerabilities";
+import type { ComparisonScope, Vulnerability, VulnerabilityPatch } from "../handlers/vulnerabilities";
 import type { CVSS } from "../handlers/vulnerabilities";
 import Vulnerabilities, { asCVSS, patchAssessments, patchEffort } from "../handlers/vulnerabilities";
 import type { AiAssessmentEdits, Assessment, AssessmentTargetPair } from "../handlers/assessments";
@@ -54,6 +54,7 @@ type Props = {
     onNavigate?: (index: number) => void;
     variantId?: string;
     projectId?: string;
+    historicalComparison?: ComparisonScope;
 };
 
 // How long the inline "Copied" confirmation stays next to a copy button.
@@ -147,7 +148,7 @@ type PendingAiEditTransition =
     | { kind: "exit" };
 
   function VulnModal(props: Readonly<Props>) {
-        const { vuln, detailsLoading = false, detailsError = false, isEditing: initialIsEditing, readOnly = false, onClose, appendAssessment, appendCVSS, vulnerabilities, currentIndex, onNavigate, variantId, projectId } = props;
+        const { vuln, detailsLoading = false, detailsError = false, isEditing: initialIsEditing, readOnly = false, onClose, appendAssessment, appendCVSS, vulnerabilities, currentIndex, onNavigate, variantId, projectId, historicalComparison } = props;
     // Full-row saves belong to the snapshot the modal opened with. Its callback
     // carries that revision so Explorer can reread instead of installing a stale row.
     const [patchVuln] = useState(() => props.patchVuln);
@@ -690,7 +691,9 @@ type PendingAiEditTransition =
         setRefreshError(null);
         setRefreshedList([]);
         const reloadMetadata = async (): Promise<Partial<Vulnerability>> => {
-            const details = await Vulnerabilities.getDetails(vuln.id, variantId, projectId);
+            const details = historicalComparison
+                ? await Vulnerabilities.getDetails(vuln.id, variantId, projectId, undefined, historicalComparison)
+                : await Vulnerabilities.getDetails(vuln.id, variantId, projectId);
             if (!details) throw new Error("Failed to load refreshed vulnerability details.");
             // Refresh endpoints return global records, not the modal's project/variant scope.
             return {
@@ -709,6 +712,9 @@ type PendingAiEditTransition =
                 euvd_fetched_at: details.euvd_fetched_at,
             };
         };
+        const metadataForRow = (row: Vulnerability, metadata: Partial<Vulnerability>) =>
+            historicalComparison && row.packages_status_by_variant === undefined
+                ? { ...metadata, texts: row.texts, severity: row.severity } : metadata;
         const latest = (...values: Array<string | undefined>) =>
             values.filter((value): value is string => Boolean(value)).sort().pop();
         try {
@@ -717,7 +723,7 @@ type PendingAiEditTransition =
                 const result = results.ghsa;
                 if (result) {
                     const metadata = await reloadMetadata();
-                    patchVuln(vuln.id, latest => ({ ...latest, ...metadata }));
+                    patchVuln(vuln.id, latest => ({ ...latest, ...metadataForRow(latest, metadata) }));
                     setRefreshedList(['GHSA']);
                 } else {
                     setRefreshError("GitHub Advisory Database refresh failed. Please try again later.");
@@ -782,7 +788,7 @@ type PendingAiEditTransition =
 
                     patchVuln(vuln.id, current => ({
                         ...current,
-                        ...merged,
+                        ...metadataForRow(current, merged),
                         aliases: euvdValue
                             ? [...new Set([...(merged.aliases ?? current.aliases), ...euvdValue.aliases])]
                             : merged.aliases ?? current.aliases,
@@ -801,7 +807,7 @@ type PendingAiEditTransition =
             setRefreshing(false);
             setHistoryVersion(version => version + 1);
         }
-    }, [vuln, patchVuln, variantId, projectId]);
+    }, [vuln, patchVuln, variantId, projectId, historicalComparison]);
 
     const copyRowId = async (row: Assessment) => {
         try {
